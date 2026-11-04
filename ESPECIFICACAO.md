@@ -4,6 +4,7 @@ Wrapper próprio do [yt-dlp](https://github.com/yt-dlp/yt-dlp) que baixa mídia 
 do **YouTube** em um de dois formatos:
 
 - **WEBM** (VP9 + Opus), até 720p, com o menor tamanho de arquivo possível;
+- **WEBM AV1** (AV1 + Opus), mesmas regras, arquivo ainda menor e re-encode mais lento (§4.1);
 - **GIF** de verdade, convertido do vídeo com paleta otimizada.
 
 Status: protótipo em `gdm-yoinks.mjs` (só X/Twitter por enquanto; ver §10). Enquanto o wrapper
@@ -84,7 +85,7 @@ projeto, rode `npm link`, que cria um link global. Como é um link, editar o
 | Opção | Padrão | Descrição |
 |---|---|---|
 | `-o, --out <pasta>` | `~/Downloads` | pasta de destino |
-| `--formato webm\|gif` | — | pula o menu (obrigatório sem terminal interativo) |
+| `--formato webm\|av1\|gif` | — | pula o menu (obrigatório sem terminal interativo); `av1` = WEBM AV1 |
 | `--max-height <n>` | `720` | teto de resolução do WEBM |
 | `--crf <n>` | `36` | qualidade do re-encode WEBM (maior = menor/pior; faixa útil 30–42) |
 | `--audio-kbps <n>` | `64` | bitrate do Opus no re-encode |
@@ -118,12 +119,13 @@ projeto, rode `npm link`, que cria um link global. Como é um link, editar o
 
    ```
    › 1 WEBM · vp9 720p · tamanho mínimo   re-encode do MP4 · menor arquivo, mantém qualidade
-     2 GIF · 480px · 10 fps               paleta otimizada em 2 passadas · loop infinito · arquivo maior
-     3 Cancelar
+     2 WEBM · av1 720p · menor ainda      re-encode → AV1/Opus · mais lento
+     3 GIF · 480px · 10 fps               paleta otimizada em 2 passadas · loop infinito · arquivo maior
+     4 Cancelar
      ↑↓ mover · enter escolher · esc sair
    ```
 
-   Teclas: `↑`/`↓` ou `k`/`j`, `1`–`3`, `Enter`, `Esc`/`q`/`Ctrl+C`.
+   Teclas: `↑`/`↓` ou `k`/`j`, `1`–`4`, `Enter`, `Esc`/`q`/`Ctrl+C`.
    Os rótulos mostram os valores **efetivos** (ex.: `10 fps` se a fonte tem 10 fps, mesmo com
    teto 15).
 4. **Progresso:** barra de download (`baixando`), spinner no re-encode WEBM, barra de
@@ -193,6 +195,21 @@ Parâmetros do re-encode:
 | `-c:a libopus -b:a 64k` | Opus a 64 kbps é transparente para fala e aceitável para música. Sem faixa de áudio na fonte (GIF do X), o parâmetro é ignorado e o webm sai só com vídeo |
 
 O `scale` só roda no re-encode. Um VP9 nativo do YouTube não é tocado, e já vem ≤ 720 pelo `-S`.
+
+### 4.1. WEBM AV1
+
+Mesma chamada do §4, com estas diferenças:
+
+- `-S "res:720,vcodec:av01,acodec:opus,+size"`: prefere AV1 na resolução escolhida.
+- Re-encode com `-c:v libaom-av1 -crf 38 -b:v 0 -row-mt 1 -tiles 2x2 -cpu-used 6` (CRF do AV1
+  vai de 0 a 63; 38 fica perto do VP9 a 36 em qualidade, com arquivo menor).
+- Sem AV1 nativo, `--merge-output-format mkv` em vez de `webm/mkv`: senão um VP9+Opus do
+  YouTube já sairia webm e o `--recode-video webm` seria pulado, entregando VP9.
+- Há AV1 nativo só quando existe um `av01` **na mesma resolução** que a seleção do VP9 pegou
+  (o `-S` decide a resolução antes do codec).
+- Nome do arquivo ganha o sufixo `_av1`, para não colidir com o WEBM VP9 do mesmo post.
+
+Medição (2026-11-04), GIF do X do §7: VP9 217.5 KB, AV1 158.4 KB, ambos 720×720.
 
 ## 5. Formato GIF
 
@@ -303,7 +320,7 @@ Quando vídeo e áudio chegam separados, a barra mostra `baixando 1/2` e `baixan
   `~/.yoinks/bin/yt-dlp.exe`; se também não houver, baixar de
   `https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe` para
   `~/.gdm-yoinks/bin/`.
-- **ffmpeg** com `libvpx-vp9`, `libopus` e o codificador `gif`, e **ffprobe**: usar os do
+- **ffmpeg** com `libvpx-vp9`, `libaom-av1`, `libopus` e o codificador `gif`, e **ffprobe**: usar os do
   PATH ou o pacote npm `ffmpeg-static` (conferir com `ffmpeg -encoders`). O ffprobe é
   obrigatório para as informações dos GIFs do X (§5.2).
 - **Node ≥ 18**, sem dependências npm. As cores usam ANSI truecolor, e o menu usa
@@ -374,7 +391,7 @@ Testes feitos:
 | conta suspensa, post apagado, privado | mensagem do yt-dlp | 1 |
 | ao vivo em andamento | `Transmissão ao vivo em andamento: tente depois que ela terminar.` | 1 |
 | ffmpeg falhou | `ffmpeg falhou: <última linha do erro>` | 1 |
-| sem terminal e sem `--formato` | `Sem terminal interativo: use --formato webm\|gif.` | 2 |
+| sem terminal e sem `--formato` | `Sem terminal interativo: use --formato webm\|av1\|gif.` | 2 |
 
 Mensagens do yt-dlp perdem o prefixo `ERROR: [extrator] `.
 
@@ -406,7 +423,7 @@ Mensagens do yt-dlp perdem o prefixo `ERROR: [extrator] `.
 ## 10. Estado do protótipo (`gdm-yoinks.mjs`)
 
 ```
-gdm-extractor [url do X] [-o pasta] [--formato webm|gif]
+gdm-extractor [url do X] [-o pasta] [--formato webm|av1|gif]
 ```
 
 | Item | Estado |

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// gdm-yoinks — protótipo. Baixa mídia do X/Twitter como WEBM (VP9/Opus, até 720p,
-// menor arquivo) ou como GIF de verdade (convertido do MP4 que o X guarda).
+// gdm-yoinks — protótipo. Baixa mídia do X/Twitter como WEBM (VP9 ou AV1, com Opus,
+// até 720p, menor arquivo) ou como GIF de verdade (convertido do MP4 que o X guarda).
 // Sem dependências: Node ≥ 18, yt-dlp e ffmpeg/ffprobe no PATH.
 //
-// Uso: node gdm-yoinks.mjs <url> [-o pasta] [--formato webm|gif]
+// Uso: node gdm-yoinks.mjs <url> [-o pasta] [--formato webm|av1|gif]
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -256,7 +256,7 @@ function leArgs(argv) {
   }
   // Sem URL, ela é pedida depois do cabeçalho (ver pedeUrl), como no yoinks.
   if (op.url && !eUrlDoX(op.url)) falha(MSG_URL_INVALIDA, 2);
-  if (op.formato && !["webm", "gif"].includes(op.formato)) falha("--formato aceita webm ou gif.", 2);
+  if (op.formato && !["webm", "av1", "gif"].includes(op.formato)) falha("--formato aceita webm, av1 ou gif.", 2);
   if (!(op.gifFps > 0) || !(op.gifLargura > 0)) falha("--gif-fps e --gif-largura precisam ser números positivos.", 2);
   return op;
 }
@@ -352,7 +352,7 @@ ${t.texto("Uso:")} gdm-extractor ${t.acento("[url do X]")} [opções]
 
 ${t.texto("Opções:")}
   ${t.acento("-o, --out <pasta>")}      ${t.fraco("destino (padrão: ~/Downloads)")}
-  ${t.acento("--formato webm|gif")}     ${t.fraco("pula o menu")}
+  ${t.acento("--formato webm|av1|gif")} ${t.fraco("pula o menu (webm = VP9, av1 = WEBM AV1)")}
   ${t.acento("--gif-fps <n>")}          ${t.fraco("quadros por segundo do GIF (padrão 15)")}
   ${t.acento("--gif-largura <n>")}      ${t.fraco("largura máxima do GIF em px (padrão 480)")}
   ${t.acento("-h, --help / -v")}        ${t.fraco("ajuda / versão")}
@@ -364,6 +364,20 @@ ${t.texto("Opções:")}
 // Mesma seleção do download WEBM: com ela, o -J já devolve em
 // `requested_formats` o que seria baixado, e o tamanho da fonte sai daí.
 const SELECAO_WEBM = ["-f", "bv*+ba/b", "-S", "res:720,vcodec:vp9,acodec:opus,+size"];
+
+// Os dois sabores de WEBM. Mudam só a preferência de codec no -S e o
+// codificador do re-encode; o resto (scale, Opus, nome do arquivo) é igual.
+// AV1: libaom com -cpu-used 6 e tiles para não ficar lento demais; o CRF do
+// AV1 vai de 0 a 63, e 38 dá tamanho/qualidade parecidos com o VP9 a 36.
+const CODECS_WEBM = {
+  webm: { nome: "VP9", sort: "vp9",
+    encoder: "-c:v libvpx-vp9 -crf 36 -b:v 0 -row-mt 1 -deadline good -cpu-used 4" },
+  av1: { nome: "AV1", sort: "av01",
+    encoder: "-c:v libaom-av1 -crf 38 -b:v 0 -row-mt 1 -tiles 2x2 -cpu-used 6" },
+};
+
+/** Lado menor do quadro: é o que o «res» do -S compara. */
+const resDe = (f) => (f.width && f.height ? Math.min(f.width, f.height) : f.height);
 
 /** Tamanho de um formato: o informado, o aproximado, ou bitrate × duração. */
 const tamanhoDe = (f, duracao) =>
@@ -388,6 +402,11 @@ async function analisa(ytdlp, url) {
 
   const vp9Nativo = formatos.some((f) => /^vp0?9/.test(f.vcodec ?? ""));
   const pedidos = info.requested_formats ?? [info];
+  // O -S do AV1 também escolhe primeiro a resolução (a maior ≤ 720) e só
+  // depois o codec. Então só há AV1 nativo se existir um av01 exatamente na
+  // resolução que a seleção do VP9 pegou; um av01 só em 1080p não conta.
+  const resEscolhida = resDe(pedidos.find((f) => f.vcodec !== "none") ?? pedidos[0]);
+  const av1Nativo = formatos.some((f) => /^av01/.test(f.vcodec ?? "") && resDe(f) === resEscolhida);
 
   // O yt-dlp nem sempre informa dimensões e fps (nos GIFs do X, nada): o
   // ffprobe completa, lendo o vídeo escolhido. O tamanho medido só vale para
@@ -400,7 +419,7 @@ async function analisa(ytdlp, url) {
   const tamanho = tamanhos.every(Boolean) ? tamanhos.reduce((a, b) => a + b, 0)
     : eGif ? sonda.tamanho : undefined;
   return {
-    info, eGif, total, vp9Nativo,
+    info, eGif, total, vp9Nativo, av1Nativo,
     partes: pedidos.length, // vídeo + áudio separados = 2 downloads
     largura: info.width ?? sonda.largura,
     altura: info.height ?? sonda.altura,
@@ -461,6 +480,8 @@ function opcoesDoMenu(m, op) {
   return [
     { id: "webm", rotulo: `WEBM · vp9 ${alturaWebm}p · tamanho mínimo`,
       detalhe: m.vp9Nativo ? "VP9/Opus nativo · sem re-encode" : "re-encode H.264 → VP9/Opus" },
+    { id: "av1", rotulo: `WEBM · av1 ${alturaWebm}p · menor ainda`,
+      detalhe: m.av1Nativo ? "AV1/Opus nativo · sem re-encode" : "re-encode → AV1/Opus · mais lento" },
     { id: "gif", rotulo: `GIF · ${larguraGif}px · ${fpsGif} fps`,
       detalhe: longo
         ? t.perigo(`vídeo longo (${Math.round(m.duracao)} s) · GIF de ~${formataBytes(estimativaGif)}`)
@@ -470,7 +491,7 @@ function opcoesDoMenu(m, op) {
 }
 
 function escolhe(opcoes) {
-  if (!process.stdin.isTTY) falha("Sem terminal interativo: use --formato webm|gif.", 2);
+  if (!process.stdin.isTTY) falha("Sem terminal interativo: use --formato webm|av1|gif.", 2);
   return new Promise((resolve) => {
     let sel = 0;
     const desenha = (primeira) => {
@@ -490,6 +511,9 @@ function escolhe(opcoes) {
     desenha(true);
     readline.emitKeypressEvents(process.stdin);
     process.stdin.setRawMode(true);
+    // pedeUrl deixa o stdin pausado; depois de um pause() explícito, só
+    // adicionar o listener não volta a ler — precisa do resume().
+    process.stdin.resume();
     const fim = (escolha) => {
       process.stdin.setRawMode(false);
       process.stdin.removeListener("keypress", tecla);
@@ -543,25 +567,32 @@ async function baixa(ytdlp, url, args, rotulo, partes, aoFase) {
   return arq;
 }
 
-async function baixaWebm(ytdlp, url, pasta, m) {
+/** `sabor` é uma chave de CODECS_WEBM: "webm" (VP9) ou "av1". */
+async function baixaWebm(ytdlp, url, pasta, m, sabor = "webm") {
   let sp = null;
-  const { vp9Nativo } = m;
+  const codec = CODECS_WEBM[sabor];
+  const nativo = sabor === "av1" ? m.av1Nativo : m.vp9Nativo;
   const arq = await baixa(ytdlp, url, [
-    ...SELECAO_WEBM,
-    "--merge-output-format", "webm/mkv",
+    "-f", "bv*+ba/b", "-S", `res:720,vcodec:${codec.sort},acodec:opus,+size`,
+    // --recode-video webm não faz nada se o arquivo já sai webm. No AV1 sem
+    // fonte AV1, a junção poderia dar um webm VP9 (YouTube) e o re-encode
+    // seria pulado; juntar em mkv garante que ele aconteça.
+    "--merge-output-format", sabor === "av1" && !nativo ? "mkv" : "webm/mkv",
     "--recode-video", "webm",
     "--postprocessor-args",
     // O scale só reduz quando o lado menor passa de 720 (fontes únicas, como GIFs
     // do X, não têm uma versão menor para o -S escolher).
     "VideoConvertor:-vf \"scale=w='if(lte(iw,ih),min(iw,720),-2)':h='if(gt(iw,ih),min(ih,720),-2)'\"" +
-      " -c:v libvpx-vp9 -crf 36 -b:v 0 -row-mt 1 -deadline good -cpu-used 4 -c:a libopus -b:a 64k",
-    "-o", path.join(pasta, "%(uploader_id)s_%(id)s.%(ext)s"),
+      ` ${codec.encoder} -c:a libopus -b:a 64k`,
+    // Sufixo no AV1 para não colidir com o WEBM VP9 do mesmo post (o yt-dlp
+    // pularia o download achando que o arquivo já existe).
+    "-o", path.join(pasta, `%(uploader_id)s_%(id)s${sabor === "av1" ? "_av1" : ""}.%(ext)s`),
   ], "baixando", m.partes, () => {
     if (sp) return;
     garanteNovaLinha();
-    sp = spinner(vp9Nativo ? "juntando vídeo e áudio…" : "re-encodando para VP9/Opus…");
+    sp = spinner(nativo ? "juntando vídeo e áudio…" : `re-encodando para ${codec.nome}/Opus…`);
   });
-  sp?.para(`${t.acento("✔")} ${t.texto(vp9Nativo ? "pronto" : "re-encode concluído")}`);
+  sp?.para(`${t.acento("✔")} ${t.texto(nativo ? "pronto" : "re-encode concluído")}`);
   return arq;
 }
 
@@ -618,7 +649,7 @@ async function main() {
 
   const arq = escolha === "gif"
     ? await baixaGif(ytdlp, op.url, op.saida, m, op)
-    : await baixaWebm(ytdlp, op.url, op.saida, m);
+    : await baixaWebm(ytdlp, op.url, op.saida, m, escolha);
 
   letreiro.para();
   garanteNovaLinha();
