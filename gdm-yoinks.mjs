@@ -260,6 +260,26 @@ class VidaBinaria {
     this.sete = { x, y, ate: this.geracao + 18 };
   }
 
+  /**
+   * Tira até `n` células vivas sorteadas da vida (elas morrem ali, sem
+   * rastro) e devolve [x, y, bit] de cada uma. É de onde o logo nasce (X5).
+   */
+  colhe(n) {
+    const vivas = [];
+    for (let k = 0; k < this.vivas.length; k++) if (this.vivas[k]) vivas.push(k);
+    for (let i = vivas.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [vivas[i], vivas[j]] = [vivas[j], vivas[i]];
+    }
+    return vivas.slice(0, n).map((k) => {
+      const x = k % this.w, y = Math.floor(k / this.w);
+      const bit = this.fita[(x + y * 13) % this.fita.length];
+      this.vivas[k] = 0;
+      this.calor[k] = 0;
+      return [x, y, bit];
+    });
+  }
+
   /** [caractere, frente] da célula, ou null se ela está vazia. */
   celula(x, y) {
     const k = y * this.w + x;
@@ -271,6 +291,63 @@ class VidaBinaria {
     if (this.calor[k] > 150) return ["·", COR_VIDA.rastroQuente];
     if (this.calor[k] > 60) return ["·", COR_VIDA.rastroFrio];
     return null;
+  }
+}
+
+// ── Abertura: o logo nasce da vida (X5) ───────────────────────────────────────
+// Ao abrir a tela cheia, cada pixel do logo sai de uma célula viva sorteada
+// (que morre ali) e voa até o seu lugar no desenho em ABERTURA_MS. Cada um
+// parte num instante sorteado e desacelera ao chegar. No começo do voo ainda é
+// o bit da vida; perto do destino vira meio bloco e pega a cor do logo. O resto
+// da interface só aparece no fim. Qualquer tecla pula.
+const ABERTURA_MS = 1000;
+const ABERTURA_ATRASO_MS = 300;  // a partida de cada pixel é sorteada até aqui
+const ABERTURA_VIRA_PIXEL = 0.4; // fração do voo em que o bit vira meio bloco
+const ABERTURA_QUADRO_MS = 30;   // a abertura redesenha mais rápido que o tique
+
+class AberturaDoLogo {
+  /**
+   * `alvos`: [{ x, y, cor }] em pixels do logo (x em colunas, y em meias
+   * linhas). `origens`: [x, y, bit] em células, vindas de VidaBinaria.colhe;
+   * os pixels que sobrarem partem de um ponto qualquer da tela.
+   */
+  constructor(alvos, origens, w, h, agora = Date.now()) {
+    this.inicio = agora;
+    const sorteia = (n) => Math.floor(Math.random() * n);
+    this.particulas = alvos.map((a, i) => {
+      const [x0, y0, bit] = origens[i] ?? [sorteia(w), sorteia(h), Math.random() < 0.5 ? "0" : "1"];
+      return { ...a, x0, y0: 2 * y0 + sorteia(2), bit, atraso: Math.random() * ABERTURA_ATRASO_MS };
+    });
+  }
+
+  acabou(agora = Date.now()) { return agora - this.inicio >= ABERTURA_MS; }
+
+  desenha(q, agora = Date.now()) {
+    const voo = ABERTURA_MS - ABERTURA_ATRASO_MS;
+    const meios = new Map(); // célula → [cor de cima, cor de baixo]
+    const bits = [];
+    for (const p of this.particulas) {
+      const k = Math.max(0, Math.min(1, (agora - this.inicio - p.atraso) / voo));
+      const e = 1 - (1 - k) ** 3; // sai rápido e pousa devagar
+      const x = Math.round(p.x0 + (p.x - p.x0) * e), y = Math.round(p.y0 + (p.y - p.y0) * e);
+      const corDaVida = p.bit === "1" ? COR_VIDA.um : COR_VIDA.zero;
+      if (k < ABERTURA_VIRA_PIXEL) {
+        bits.push([x, y >> 1, p.bit, misturaHex(p.cor, corDaVida, (k / ABERTURA_VIRA_PIXEL) * 0.5)]);
+        continue;
+      }
+      const cor = misturaHex(p.cor, corDaVida, Math.min(1, 0.5 + (k - ABERTURA_VIRA_PIXEL) * 2));
+      const chave = (y >> 1) * q.w + x;
+      const celula = meios.get(chave) ?? [null, null];
+      celula[y & 1] = cor;
+      meios.set(chave, celula);
+    }
+    // Primeiro os bits; os meios blocos, que já estão chegando, ficam por cima.
+    for (const [x, y, bit, cor] of bits) if (!meios.has(y * q.w + x)) q.poe(x, y, bit, cor);
+    for (const [chave, [cima, baixo]] of meios) {
+      const x = chave % q.w, y = Math.floor(chave / q.w);
+      if (cima && baixo) q.poe(x, y, cima === baixo ? "█" : "▀", cima, cima === baixo ? PALETA.fundo : baixo);
+      else q.poe(x, y, cima ? "▀" : "▄", cima ?? baixo);
+    }
   }
 }
 
@@ -342,6 +419,7 @@ class TelaCheia {
     this.etapaAtual = null;
     this.resultado = null;
     this.aoTecla = null;
+    this.abertura = null; // X5, só enquanto o logo está se formando
     this.ativa = false;
     this.historico = []; // linhas dos arquivos gerados, impressas na tela normal ao sair
   }
@@ -372,13 +450,32 @@ class TelaCheia {
     process.stdin.resume();
     this.leTecla = (b) => this.tecla(b.toString("utf8"));
     process.stdin.on("data", this.leTecla);
-    this.aoRedimensionar = () => { this.dimensiona(); this.desenha(); };
+    this.aoRedimensionar = () => { this.fimDaAbertura(); this.dimensiona(); this.desenha(); };
     process.stdout.on("resize", this.aoRedimensionar);
     this.aoSair = () => this.encerra();
     process.on("exit", this.aoSair);
     this.ultimaGeracao = Date.now();
     this.id = setInterval(() => this.tique(), 70);
+    this.comecaAbertura();
     this.desenha();
+  }
+
+  /** O logo nasce da vida (X5). Só na abertura, e só se a janela comporta a interface. */
+  comecaAbertura() {
+    if (!this.cabeAgora()) return;
+    const { xl, y0 } = this.posicaoLogo(), alvos = [];
+    this.desenho.forEach((linha, py) => [...linha].forEach((_, x) => {
+      const cor = corPixelLogo(this.desenho, x, py);
+      if (cor) alvos.push({ x: xl + x, y: 2 * y0 + py, cor });
+    }));
+    this.abertura = new AberturaDoLogo(alvos, this.vida.colhe(alvos.length), this.w, this.h);
+    this.idAbertura = setInterval(() => this.desenha(), ABERTURA_QUADRO_MS);
+  }
+
+  fimDaAbertura() {
+    if (!this.abertura) return;
+    this.abertura = null;
+    clearInterval(this.idAbertura);
   }
 
   /** Devolve o terminal como estava. Pode ser chamada mais de uma vez. */
@@ -386,6 +483,7 @@ class TelaCheia {
     if (!this.ativa) return;
     this.ativa = false;
     clearInterval(this.id);
+    this.fimDaAbertura();
     process.stdin.removeListener("data", this.leTecla);
     process.stdin.setRawMode(false);
     process.stdin.pause();
@@ -424,6 +522,8 @@ class TelaCheia {
       if (!this.historico.length || this.fase === "menu" || this.fase === "recorte") console.log(`  ${t.fraco("cancelado.")}\n`);
       process.exit(130);
     }
+    // Qualquer outra tecla na abertura só a pula: não chega ao campo de URL.
+    if (this.abertura) { this.fimDaAbertura(); this.desenha(); return; }
     this.aoTecla?.(s);
     this.desenha();
   }
@@ -431,7 +531,9 @@ class TelaCheia {
   desenha() {
     if (!this.ativa) return;
     const q = new Quadro(this.w, this.h);
-    if (this.w < Math.max(this.larguraLogo, LARGURA_PALCO) + 4 || this.h < MIN_LINHAS) {
+    if (this.abertura?.acabou()) this.fimDaAbertura();
+    if (!this.cabeAgora()) {
+      this.fimDaAbertura();
       q.centro(Math.floor(this.h / 2), [[`aumente a janela (mínimo ${Math.max(this.larguraLogo, LARGURA_PALCO) + 4}×${MIN_LINHAS})`, PALETA.fraco]]);
     } else this.compoe(q);
 
@@ -454,10 +556,19 @@ class TelaCheia {
     if (s) process.stdout.write(`\x1b[?2026h${s}\x1b[?2026l`);
   }
 
-  compoe(q) {
+  cabeAgora() {
+    return this.w >= Math.max(this.larguraLogo, LARGURA_PALCO) + 4 && this.h >= MIN_LINHAS;
+  }
+
+  /** Canto de cima à esquerda do logo; o resto da interface é posto a partir dele. */
+  posicaoLogo() {
     const total = this.alturaLogo + 1 + 1 + 1 + 2 + 1 + ALTURA_PALCO + 1 + 1;
-    const y0 = Math.max(0, Math.floor((this.h - total) / 2));
-    const xl = Math.floor((this.w - this.larguraLogo) / 2);
+    return { y0: Math.max(0, Math.floor((this.h - total) / 2)), xl: Math.floor((this.w - this.larguraLogo) / 2) };
+  }
+
+  compoe(q) {
+    if (this.abertura) return this.abertura.desenha(q);
+    const { y0, xl } = this.posicaoLogo();
 
     for (let l = 0; l < this.alturaLogo; l++) for (let x = 0; x < this.larguraLogo; x++) {
       const c = celulaLogo(this.desenho, x, l, PALETA.fundo);
