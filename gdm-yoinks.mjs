@@ -3,13 +3,18 @@
 // até 720p, menor arquivo) ou como GIF de verdade (convertido do vídeo).
 // Sem dependências: Node ≥ 18, yt-dlp e ffmpeg/ffprobe no PATH.
 //
-// Uso: node gdm-yoinks.mjs <url> [-o pasta] [--formato webm|av1|gif]
+// Uso: gdm-extractor <url> [-o pasta] [--formato webm|av1|gif] [--inicio t] [--fim t | --duracao t]
+// (gdm-yoinks é o nome do projeto; gdm-extractor, o do comando.)
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
+import {
+  DURACAO_PADRAO_S, MIN_TRECHO_S, leTempo, formataTempo, sufixoDoTrecho, textoDoTrecho, tempoDoLink,
+  recorteDasOpcoes, movePonta,
+} from "./tempo.mjs";
 
 const VERSAO = "0.1.0";
 
@@ -70,6 +75,25 @@ function falha(msg, codigo = 1) {
 // então quem sai no meio de um download (Ctrl+C, erro) os encerra aqui.
 const filhos = new Set();
 process.on("exit", () => { for (const p of filhos) p.kill(); });
+
+// Pastas temporárias (§5.3). falha() e o Ctrl+C saem com process.exit(), que
+// não roda os `finally`; por isso a limpeza fica no «exit», que sempre roda.
+const temporarias = new Set();
+process.on("exit", () => {
+  for (const d of temporarias) try { fs.rmSync(d, { recursive: true, force: true }); } catch {}
+});
+
+// Ctrl+C fora do modo cru (download no modo linha): código 130 (§3.2).
+process.on("SIGINT", () => { letreiro.para(); process.exit(130); });
+
+/**
+ * Mensagem de erro do yt-dlp sem o prefixo «ERROR: [extrator] <id>: » (§8).
+ * O id só sai se tiver dígito, para não comer um «Unsupported URL: …».
+ */
+function msgDoYtDlp(erro, padrao = "yt-dlp falhou") {
+  const msg = (erro.match(/ERROR:.*$/m) ?? [erro.trim() || padrao])[0];
+  return msg.replace(/^ERROR:\s*(\[[\w:]+\]\s*)?([\w-]*\d[\w-]*:\s+)?/, "");
+}
 
 /** Roda um programa e devolve { codigo, saida, erro }. `aoLer` recebe cada linha. */
 function roda(cmd, args, aoLer) {
@@ -395,7 +419,9 @@ class TelaCheia {
     if (s === "\x03" && this.fase === "url") s = "\x1b"; // no campo, Ctrl+C é como Esc (§3.1: código 0)
     if (s === "\x03") { // Ctrl+C: o modo cru não gera SIGINT, então sai daqui
       this.encerra();
-      console.log(`  ${t.fraco("cancelado.")}\n`);
+      // Com extrações feitas, o histórico já foi impresso; «cancelado.» só se
+      // nada foi extraído ou se o menu foi cancelado (§6.2).
+      if (!this.historico.length || this.fase === "menu" || this.fase === "recorte") console.log(`  ${t.fraco("cancelado.")}\n`);
       process.exit(130);
     }
     this.aoTecla?.(s);
@@ -452,7 +478,7 @@ class TelaCheia {
     q.centro(yT + 1, [[`webm · webm av1 · gif · v${VERSAO}`, PALETA.fraco]]);
 
     const yP = yT + 3, xP = Math.floor((this.w - LARGURA_PALCO) / 2);
-    ({ url: this.palcoUrl, analisando: this.palcoUrl, menu: this.palcoMenu,
+    ({ url: this.palcoUrl, analisando: this.palcoUrl, menu: this.palcoMenu, recorte: this.palcoRecorte,
       baixando: this.palcoDownload, pronto: this.palcoPronto })[this.fase].call(this, q, xP, yP);
 
     q.centro(yP + ALTURA_PALCO + 1, this.atalhos());
@@ -462,7 +488,13 @@ class TelaCheia {
     const T = PALETA.texto, F = PALETA.fraco, sep = "   ·   ";
     switch (this.fase) {
       case "url": return [["↵", T], [" extrair" + sep, F], ["tab", T], [" colar" + sep, F], ["esc", T], [" sair", F]];
-      case "menu": return [["↑↓", T], [" mover" + sep, F], ["↵", T], [" escolher" + sep, F], ["esc", T], [" sair", F]];
+      case "menu": return [["↑↓", T], [" mover" + sep, F], ["↵", T], [" escolher" + sep, F],
+        ...(this.menu?.recortavel ? [["r", T], [" recortar" + sep, F]] : []), ["esc", T], [" sair", F]];
+      case "recorte": {
+        const s = "  ·  ";
+        return [["←→", T], [" ±1 s  ", F], ["⇧", T], [" ±5 s" + s, F], ["tab", T], [" início/fim" + s, F],
+          ["0-9", T], [" digitar" + s, F], ["↵", T], [" ok" + s, F], ["esc", T], [" inteiro", F]];
+      }
       case "pronto": return [["↵", T], [" novo link" + sep, F], ["esc", T], [" sair", F]];
       default: return [["^c", T], [" cancelar", F]];
     }
@@ -502,13 +534,20 @@ class TelaCheia {
     if (dica.length) q.centro(y + 4, dica);
   }
 
-  /** Título e dados da mídia, nas primeiras linhas do palco. */
-  palcoCartao(q, x0, y) {
+  /**
+   * Título e dados da mídia, nas primeiras linhas do palco. Aviso e trecho
+   * usam as linhas 3 e 4 (a 4 só quando há os dois; as opções começam na 5).
+   */
+  palcoCartao(q, x0, y, trechoAoVivo) {
     const d = this.cartao;
     q.trechos(x0, y, [[corta(d.titulo, LARGURA_PALCO), PALETA.pico]]);
     q.trechos(x0, y + 1, [["tipo   ", PALETA.fraco], [d.tipo, PALETA.texto]]);
     q.trechos(x0, y + 2, [["fonte  ", PALETA.fraco], [d.fonte, PALETA.texto]]);
-    if (d.aviso) q.trechos(x0, y + 3, [["aviso  ", PALETA.fraco], [d.aviso, PALETA.texto]]);
+    // Na fase de recorte, a linha «trecho» acompanha o que está sendo ajustado.
+    const extras = trechoAoVivo
+      ? [...d.extras.filter(([r]) => r !== "trecho"), ["trecho", trechoAoVivo]] : d.extras;
+    extras.slice(0, 2).forEach(([rotulo, texto], i) =>
+      q.trechos(x0, y + 3 + i, [[rotulo.padEnd(7), PALETA.fraco], [corta(texto, LARGURA_PALCO - 7), PALETA.texto]]));
   }
 
   palcoMenu(q, x0, y) {
@@ -521,6 +560,50 @@ class TelaCheia {
         [o.detalhe ? "  " + o.detalhe : "", o.alerta ? PALETA.perigo : PALETA.fraco],
       ]);
     });
+  }
+
+  /**
+   * Fase de recorte: o cartão com o trecho ao vivo, a linha do tempo, os dois
+   * campos e as estimativas, que são refeitas a cada tecla.
+   *
+   *   0:00 ━━━━━━━━━┫████┣━━━━━━━━━━━━ 3:32
+   *   › início 1:30█      fim 1:40
+   *   GIF ~2.1 MB · WEBM ~0.9 MB
+   */
+  palcoRecorte(q, x0, y) {
+    const r = this.rec, vivo = this.trechoAoVivo(), dur = vivo.fim - vivo.inicio;
+    const { A, F, T, P, B } = { A: PALETA.acento, F: PALETA.fraco, T: PALETA.texto, P: PALETA.pico, B: PALETA.borda };
+    this.palcoCartao(q, x0, y, textoDoTrecho(vivo));
+
+    // Linha do tempo: «┫» e «┣» nas pontas, a ativa em --pico.
+    const esq = `${formataTempo(0)} `, dir = ` ${formataTempo(r.total)}`;
+    const largura = LARGURA_PALCO - esq.length - dir.length;
+    const coluna = (s) => Math.round((s / r.total) * (largura - 1));
+    const a = Math.min(coluna(vivo.inicio), largura - 2), b = Math.max(a + 1, coluna(vivo.fim));
+    const barra = [];
+    for (let i = 0; i < largura; i++) {
+      if (i === a) barra.push(["┫", r.ativo === "inicio" ? P : A]);
+      else if (i === b) barra.push(["┣", r.ativo === "fim" ? P : A]);
+      else barra.push(i > a && i < b ? ["█", A] : ["━", B]);
+    }
+    q.trechos(x0, y + 5, [[esq, F], ...barra, [dir, F]]);
+
+    // Campos: o ativo com «›» e o cursor; digitando, mostra o texto cru.
+    const piscando = Math.floor(Date.now() / 530) % 2 === 0;
+    const campo = (ponta, rotulo) => {
+      const ativo = r.ativo === ponta;
+      const valor = ativo && r.texto !== null ? r.texto : formataTempo(vivo[ponta]);
+      return [[ativo ? "› " : "  ", A], [rotulo + " ", F], [valor, ativo ? P : T], [ativo && piscando ? "█" : " ", T]];
+    };
+    const x = q.trechos(x0, y + 6, campo("inicio", "início"));
+    q.trechos(Math.max(x + 4, x0 + 20), y + 6, campo("fim", "fim"));
+
+    const gif = estimativaGif(r.m, r.op, dur), webm = estimativaWebm(r.m, dur);
+    q.trechos(x0, y + 7, [
+      ["GIF ", F], [gif ? `~${formataBytes(gif)}` : "?", dur > GIF_LONGO_S ? PALETA.perigo : T],
+      [" · WEBM ", F], [webm ? `~${formataBytes(webm)}` : "?", T],
+      [dur > GIF_LONGO_S ? `   GIF longo: mais de ${GIF_LONGO_S} s` : "", PALETA.perigo],
+    ]);
   }
 
   palcoDownload(q, x0, y) {
@@ -580,20 +663,69 @@ class TelaCheia {
 
   mostraCartao(m) { this.cartao = dadosDoCartao(m); }
 
-  escolhe(opcoes) {
+  /** Menu de formatos. Resolve com o id da opção, "sair", ou "recortar" (tecla r, se `recortavel`). */
+  escolhe(opcoes, recortavel = false) {
     this.fase = "menu";
-    this.menu = { opcoes, sel: 0 };
+    // A seleção sobrevive à ida e volta da fase de recorte.
+    this.menu = { opcoes, sel: this.menu?.sel ?? 0, recortavel };
     return new Promise((resolve) => {
       const n = opcoes.length;
+      const fim = (id) => { this.aoTecla = null; resolve(id); };
       this.aoTecla = (s) => {
         const m = this.menu;
         if (s === "\x1b[A" || s === "k") m.sel = (m.sel + n - 1) % n;
         else if (s === "\x1b[B" || s === "j") m.sel = (m.sel + 1) % n;
         else if (/^[1-9]$/.test(s) && Number(s) <= n) m.sel = Number(s) - 1;
-        else if (s === "\r" || s === "\n") { this.aoTecla = null; resolve(opcoes[m.sel].id); }
-        else if (s === "\x1b" || s === "q") { this.aoTecla = null; resolve("sair"); }
+        else if (s === "\r" || s === "\n") fim(opcoes[m.sel].id);
+        else if ((s === "r" || s === "R") && recortavel) fim("recortar");
+        else if (s === "\x1b" || s === "q") fim("sair");
       };
     });
+  }
+
+  /**
+   * Fase de recorte (F3). Começa no recorte atual; sem ele, no início do link
+   * (&t=) ou no zero, com DURACAO_PADRAO_S. Resolve com { inicio, fim }, ou
+   * null para o vídeo inteiro (Esc, ou um trecho que pega o vídeo todo).
+   */
+  recorta(m, op) {
+    this.fase = "recorte";
+    const total = m.duracao, min = Math.min(MIN_TRECHO_S, total);
+    const inicio = m.recorte?.inicio ?? Math.min(m.inicioDoLink ?? 0, total - min);
+    const fim = m.recorte?.fim ?? Math.min(total, inicio + DURACAO_PADRAO_S);
+    const r = this.rec = { m, op, total, min, inicio, fim, ativo: "inicio", texto: null };
+    const poe = (v) => Object.assign(r, movePonta(r, r.ativo, v, r.total, r.min));
+    /** Aplica o que foi digitado no campo ativo (se for um tempo válido) e fecha a edição. */
+    const confirma = () => {
+      if (r.texto === null) return;
+      const v = leTempo(r.texto);
+      r.texto = null;
+      if (v !== null) poe(v);
+    };
+
+    return new Promise((resolve) => {
+      // this.rec fica: a tecla que fechou a fase ainda redesenha a tela antes
+      // de o menu voltar (ver tecla()).
+      const fim = (recorte) => { this.aoTecla = null; resolve(recorte); };
+      this.aoTecla = (s) => {
+        const passo = { "\x1b[D": -1, "\x1b[C": 1, "\x1bOD": -1, "\x1bOC": 1, "\x1b[1;2D": -5, "\x1b[1;2C": 5 }[s];
+        if (passo) { confirma(); poe(r[r.ativo] + passo); }
+        else if (s === "\t") { confirma(); r.ativo = r.ativo === "inicio" ? "fim" : "inicio"; }
+        else if (s === "\r" || s === "\n") {
+          confirma();
+          fim(r.inicio <= 0 && r.fim >= r.total - 0.05 ? null : { inicio: r.inicio, fim: r.fim });
+        }
+        else if (s === "\x1b") fim(null);
+        else if (s === "\x7f" || s === "\b") r.texto = (r.texto ?? formataTempo(r[r.ativo])).slice(0, -1);
+        else if (/^[0-9:.hms]+$/.test(s)) r.texto = ((r.texto ?? "") + s).slice(0, 10);
+      };
+    });
+  }
+
+  /** Início e fim que a fase de recorte mostra agora, contando o que está sendo digitado. */
+  trechoAoVivo() {
+    const r = this.rec, v = r.texto === null ? null : leTempo(r.texto);
+    return v === null ? { inicio: r.inicio, fim: r.fim } : movePonta(r, r.ativo, v, r.total, r.min);
   }
 
   baixando() { this.fase = "baixando"; this.prog = null; this.etapaAtual = null; }
@@ -636,7 +768,6 @@ const letreiro = {
     if (!process.stdout.isTTY || semCor) { console.log("  " + this.quadro()); return; }
     process.stdout.write("\x1b[?25l"); // cursor escondido enquanto anda
     process.on("exit", () => process.stdout.write("\x1b[?25h"));
-    process.on("SIGINT", () => { this.para(); process.exit(130); });
     this.desenhaAqui();
     this.observaSaida();
     this.id = setInterval(() => this.avanca(), 70);
@@ -756,15 +887,22 @@ function etapa(texto) {
 
 // ── Argumentos ────────────────────────────────────────────────────────────────
 function leArgs(argv) {
-  const op = { url: null, saida: path.join(os.homedir(), "Downloads"), formato: null, gifFps: 15, gifLargura: 480 };
+  const op = { url: null, saida: path.join(os.homedir(), "Downloads"), formato: null, gifFps: 15, gifLargura: 480,
+    trecho: {} }; // { inicio, fim, duracao } em segundos, das opções do recorte (F3)
+  /** Valor da opção `a`; sem valor é argumento inválido (código 2). */
+  const valor = (i, a) => {
+    if (argv[i] === undefined || argv[i] === "") falha(`A opção ${a} precisa de um valor.`, 2);
+    return argv[i];
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "-h" || a === "--help") ajuda();
     else if (a === "-v" || a === "--version") { console.log(VERSAO); process.exit(0); }
-    else if (a === "-o" || a === "--out") op.saida = argv[++i];
-    else if (a === "--formato") op.formato = argv[++i];
-    else if (a === "--gif-fps") op.gifFps = Number(argv[++i]);
-    else if (a === "--gif-largura") op.gifLargura = Number(argv[++i]);
+    else if (a === "-o" || a === "--out") op.saida = valor(++i, a);
+    else if (a === "--formato") op.formato = valor(++i, a);
+    else if (a === "--gif-fps") op.gifFps = Number(valor(++i, a));
+    else if (a === "--gif-largura") op.gifLargura = Number(valor(++i, a));
+    else if (a === "--inicio" || a === "--fim" || a === "--duracao") op.trecho[a.slice(2)] = tempo(valor(++i, a), a);
     else if (a.startsWith("-")) falha(`Opção desconhecida: ${a}`, 2);
     else op.url = a;
   }
@@ -772,7 +910,19 @@ function leArgs(argv) {
   if (op.url && !eUrlAceita(op.url)) falha(msgUrlRecusada(op.url), 2);
   if (op.formato && !["webm", "av1", "gif"].includes(op.formato)) falha("--formato aceita webm, av1 ou gif.", 2);
   if (!(op.gifFps > 0) || !(op.gifLargura > 0)) falha("--gif-fps e --gif-largura precisam ser números positivos.", 2);
+  // O trecho só é conferido contra a duração do vídeo depois da análise (recorteDasOpcoes).
+  const { inicio = 0, fim, duracao } = op.trecho;
+  if (fim != null && duracao != null) falha("Use --fim ou --duracao, não os dois.", 2);
+  if (fim != null && fim <= inicio) falha("--fim precisa ser depois do --inicio.", 2);
+  if (duracao != null && duracao <= 0) falha("--duracao precisa ser maior que zero.", 2);
   return op;
+}
+
+/** Tempo de uma opção (--inicio etc.), ou sai com código 2. */
+function tempo(s, opcao) {
+  const v = leTempo(s);
+  if (v === null) falha(`${opcao} não entendeu «${s}»: use segundos (83, 90s), 1:23 ou 1:02:03.`, 2);
+  return v;
 }
 
 const MSG_URL_INVALIDA = "A URL não parece um post do X/Twitter nem um vídeo do YouTube.";
@@ -780,8 +930,10 @@ const MSG_URL_LISTA = "Playlists e canais não são suportados; use o link de um
 
 // URLs aceitas (§2). No YouTube, o id do vídeo tem 11 caracteres; o `v=` pode
 // vir depois de outros parâmetros (watch?feature=x&v=…). `&list=` e `&t=` são
-// aceitos: o --no-playlist baixa só o vídeo, e o tempo é ignorado.
-const RE_X = /^https?:\/\/(www\.|mobile\.)?(x|twitter)\.com\/[^/\s]+\/status\/\d+\S*$/i;
+// aceitos: o --no-playlist baixa só o vídeo, e o tempo vira o início do
+// recorte (F3: na tela cheia, só preenche a fase de recorte; no modo linha,
+// vale com --formato gif; ver tempoDoLink).
+const RE_X = /^https?:\/\/(www\.|mobile\.)?(x|twitter)\.com\/(i\/web|[^/\s]+)\/status\/\d+\S*$/i;
 const RE_YOUTUBE = /^https?:\/\/(((www|m)\.)?youtube\.com\/(watch\?(\S*&)?v=|shorts\/|embed\/|live\/)|youtu\.be\/)[\w-]{11}(?![\w-])\S*$/i;
 const RE_YOUTUBE_LISTA = /^https?:\/\/((www|m)\.)?youtube\.com\/(playlist\?|channel\/|c\/|user\/|@)/i;
 
@@ -888,7 +1040,13 @@ ${t.texto("Opções:")}
   ${t.acento("--formato webm|av1|gif")} ${t.fraco("pula o menu (webm = VP9, av1 = WEBM AV1)")}
   ${t.acento("--gif-fps <n>")}          ${t.fraco("quadros por segundo do GIF (padrão 15)")}
   ${t.acento("--gif-largura <n>")}      ${t.fraco("largura máxima do GIF em px (padrão 480)")}
+  ${t.acento("--inicio <tempo>")}       ${t.fraco("recorta a partir daqui (83, 90s, 1:23 ou 1:02:03)")}
+  ${t.acento("--fim <tempo>")}          ${t.fraco("recorta até aqui (padrão: o fim do vídeo)")}
+  ${t.acento("--duracao <tempo>")}      ${t.fraco("ou: duração do trecho, no lugar do --fim")}
   ${t.acento("-h, --help / -v")}        ${t.fraco("ajuda / versão")}
+
+${t.fraco(`Com --formato gif, o &t= de um link do YouTube vira o --inicio (trecho de ${DURACAO_PADRAO_S} s).`)}
+${t.fraco("Na tela cheia, a tecla r do menu abre o recorte.")}
 `);
   process.exit(0);
 }
@@ -898,16 +1056,55 @@ ${t.texto("Opções:")}
 // `requested_formats` o que seria baixado, e o tamanho da fonte sai daí.
 const SELECAO_WEBM = ["-f", "bv*+ba/b", "-S", "res:720,vcodec:vp9,acodec:opus,+size"];
 
-// Os dois sabores de WEBM. Mudam só a preferência de codec no -S e o
-// codificador do re-encode; o resto (scale, Opus, nome do arquivo) é igual.
+// Os sabores de WEBM. Mudam só a preferência de codec no -S e o codificador
+// do re-encode; o resto (scale, Opus, nome do arquivo) é igual.
 // AV1: libaom com -cpu-used 6 e tiles para não ficar lento demais; o CRF do
 // AV1 vai de 0 a 63, e 38 dá tamanho/qualidade parecidos com o VP9 a 36.
+// SVT-AV1 (F9): bem mais rápido que o libaom com tamanho parecido; é usado
+// quando o ffmpeg instalado tem o libsvtav1.
+//
+// Teto de bitrate (F1): o re-encode não deve gastar mais bits de vídeo que a
+// fonte. `teto(kbps)` são os argumentos com o teto; `semTeto`, sem ele.
+// - libvpx (VP9): CRF com -b:v diferente de 0 é o modo «constrained quality»,
+//   em que o -b:v é o teto da média. Medido no vídeo do X do §7: 4.9 MB sem
+//   teto, 3.5 MB com teto de 633 kbps; no GIF do X, o teto não aumenta nada.
+// - libsvtav1: «capped CRF» (-maxrate, com -bufsize de 2×).
+// - libaom (AV1): nenhum modo de bitrate de uma passada respeita o alvo
+//   (P1-Puzzle.md): com -crf e -b:v o -b:v vira alvo e o arquivo cresce, e
+//   tanto esse modo quanto o VBR passam do alvo em 28–50%. O que controla bem
+//   o tamanho é o próprio CRF. Então o libaom escolhe o CRF por amostras
+//   (`escolheCrf`, ver crfPorAmostras), sempre em qualidade constante.
+//
+// No AV1 o alvo é 70% da fonte (FATOR_ALVO_AV1): o AV1 é bem mais eficiente
+// que o H.264, e re-encodar para o mesmo tamanho não economiza nada.
 const CODECS_WEBM = {
-  webm: { nome: "VP9", sort: "vp9",
-    encoder: "-c:v libvpx-vp9 -crf 36 -b:v 0 -row-mt 1 -deadline good -cpu-used 4" },
-  av1: { nome: "AV1", sort: "av01",
-    encoder: "-c:v libaom-av1 -crf 38 -b:v 0 -row-mt 1 -tiles 2x2 -cpu-used 6" },
+  webm: { nome: "VP9", sort: "vp9", fatorAlvo: 1,
+    encoder: ["-c:v", "libvpx-vp9", "-crf", "36", "-row-mt", "1", "-deadline", "good", "-cpu-used", "4"],
+    semTeto: ["-b:v", "0"], teto: (kbps) => ["-b:v", `${kbps}k`] },
+  av1: { nome: "AV1", sort: "av01", fatorAlvo: 0.7, escolheCrf: true,
+    encoder: ["-c:v", "libaom-av1", "-row-mt", "1", "-tiles", "2x2", "-cpu-used", "6"],
+    crf: (n) => ["-crf", String(n), "-b:v", "0"] },
+  av1Svt: { nome: "AV1", sort: "av01", fatorAlvo: 0.7,
+    encoder: ["-c:v", "libsvtav1", "-crf", "38", "-preset", "8", "-pix_fmt", "yuv420p"],
+    semTeto: [], teto: (kbps) => ["-maxrate", `${kbps}k`, "-bufsize", `${2 * kbps}k`] },
 };
+
+// Escolha do CRF do libaom (P1-Puzzle.md). CRF_AV1 é o padrão; CRF_AV1_MAX
+// é o limite de qualidade (no Puzzle, CRF 50 ainda tem SSIM 0.961, acima do
+// VP9 com teto, 0.954). As amostras são trechos de AMOSTRA_S segundos nas
+// posições de POSICOES_AMOSTRA; vídeos curtos viram uma amostra só, inteira.
+const CRF_AV1 = 38, CRF_AV1_SONDA = 46, CRF_AV1_MAX = 50;
+const AMOSTRA_S = 3, POSICOES_AMOSTRA = [0.25, 0.5, 0.75];
+
+/** Codificador de um sabor ("webm" ou "av1"); no AV1, o SVT quando houver. */
+const codecDoSabor = (sabor, m) => CODECS_WEBM[sabor === "av1" && m.svtAv1 ? "av1Svt" : sabor];
+
+/** Lista de encoders do ffmpeg instalado (texto do `ffmpeg -encoders`), ou "" se falhar. */
+const leEncoders = () => roda("ffmpeg", ["-hide_banner", "-encoders"]).then((r) => (r.codigo === 0 ? r.saida : ""));
+
+// Reduz para 720 no lado menor só quando a fonte passa disso (§4); -2 mantém
+// a proporção com dimensão par.
+const ESCALA_720 = "scale=w='if(lte(iw,ih),min(iw,720),-2)':h='if(gt(iw,ih),min(ih,720),-2)'";
 
 /** Lado menor do quadro: é o que o «res» do -S compara. */
 const resDe = (f) => (f.width && f.height ? Math.min(f.width, f.height) : f.height);
@@ -918,13 +1115,12 @@ const tamanhoDe = (f, duracao) =>
 
 async function analisa(ytdlp, url) {
   const r = await roda(ytdlp, ["-J", "--no-warnings", "--no-playlist", ...SELECAO_WEBM, url]);
-  if (r.codigo !== 0) {
-    const msg = (r.erro.match(/ERROR:.*$/m) ?? [r.erro.trim() || "yt-dlp falhou"])[0];
-    falha(msg.replace(/^ERROR:\s*(\[\w+\]\s*)?/, ""));
-  }
+  if (r.codigo !== 0) falha(msgDoYtDlp(r.erro));
   let info = JSON.parse(r.saida);
   let total = 1;
-  if (info._type === "playlist") { // post com várias mídias: usa a primeira
+  // Post com várias mídias e sem «…/video/N» na URL: usa a primeira. Com o
+  // /video/N, o --no-playlist já faz o yt-dlp devolver só a N-ésima.
+  if (info._type === "playlist") {
     total = info.entries.length;
     info = info.entries[0];
   }
@@ -936,8 +1132,11 @@ async function analisa(ytdlp, url) {
   const fonteGif = formatos.find((f) => /\/tweet_video\//.test(f.url ?? ""));
   const eGif = Boolean(fonteGif);
 
-  const vp9Nativo = formatos.some((f) => /^vp0?9/.test(f.vcodec ?? ""));
   const pedidos = info.requested_formats ?? [info];
+  // VP9 nativo é o que a própria seleção do WEBM pegou (o -J já usa ela). Um
+  // VP9 só em outra resolução não conta: o Puzzle tem VP9 só em 360p, e o
+  // H.264 de 720p escolhido iria com -c:v copy para dentro do webm.
+  const vp9Nativo = pedidos.some((f) => /^vp0?9/.test(f.vcodec ?? ""));
   // O -S do AV1 também escolhe primeiro a resolução (a maior ≤ 720) e só
   // depois o codec. Então só há AV1 nativo se existir um av01 exatamente na
   // resolução que a seleção do VP9 pegou; um av01 só em 1080p não conta.
@@ -956,8 +1155,14 @@ async function analisa(ytdlp, url) {
   const tamanhos = pedidos.map((f) => tamanhoDe(f, duracao));
   const tamanho = tamanhos.every(Boolean) ? tamanhos.reduce((a, b) => a + b, 0)
     : eGif ? sonda.tamanho : undefined;
+  // Bitrate de vídeo informado pelo site (kbps). É só a reserva do teto do
+  // F1: o valor medido no arquivo baixado é mais exato (no HLS do X, o
+  // informado é o nominal, ~20% acima do real).
+  const temAudio = video && video.acodec && video.acodec !== "none";
+  const kbpsVideo = video?.vbr || (video?.tbr ? video.tbr - (temAudio ? video.abr ?? 0 : 0) : undefined);
   return {
-    info, site, eGif, total, vp9Nativo, av1Nativo,
+    info, site, eGif, total, vp9Nativo, av1Nativo, kbpsVideo,
+    semFfprobe: Boolean(sonda.semFfprobe),
     partes: pedidos.length, // vídeo + áudio separados = 2 downloads
     largura: info.width ?? sonda.largura,
     altura: info.height ?? sonda.altura,
@@ -970,6 +1175,7 @@ async function analisa(ytdlp, url) {
 async function sondaRemoto(url) {
   const r = await roda("ffprobe", ["-v", "error", "-select_streams", "v:0",
     "-show_entries", "stream=width,height,avg_frame_rate:format=duration,size", "-of", "json", url]);
+  if (r.codigo === -1) return { semFfprobe: true }; // não conseguiu nem iniciar
   if (r.codigo !== 0) return {};
   try {
     const j = JSON.parse(r.saida);
@@ -988,11 +1194,19 @@ async function sondaRemoto(url) {
 /** O que o cartão mostra, em texto puro (o modo linha e a tela cheia pintam cada um do seu jeito). */
 function dadosDoCartao(m) {
   const dims = m.largura ? `${m.largura}×${m.altura}` : "?";
+  const aviso = [
+    m.total > 1 ? `post tem ${m.total} mídias; usando a primeira` : "",
+    m.semFfprobe ? "ffprobe não encontrado; dimensões e fps incompletos" : "",
+  ].filter(Boolean).join(" · ");
+  // Na tela cheia, o &t= do link não recorta sozinho: o cartão avisa (F3).
+  const trecho = m.recorte ? textoDoTrecho(m.recorte)
+    : m.inicioDoLink ? `vídeo inteiro · início do link ${formataTempo(m.inicioDoLink)} (r para recortar)` : "";
   return {
     titulo: (m.info.title ?? m.info.id).replace(/\s+/g, " "),
     tipo: m.eGif ? "GIF do X (guardado como MP4 sem áudio)" : m.site === "youtube" ? "vídeo do YouTube" : "vídeo do X",
     fonte: `${dims} · ${m.fps ? m.fps + " fps" : "? fps"} · ${m.duracao ? m.duracao.toFixed(1) + " s" : "? s"} · ${formataBytes(m.tamanho)}`,
-    aviso: m.total > 1 ? `post tem ${m.total} mídias; usando a primeira` : "",
+    // Linhas opcionais, embaixo da «fonte»: [rótulo, texto].
+    extras: [["aviso", aviso], ["trecho", trecho]].filter(([, s]) => s),
   };
 }
 
@@ -1004,7 +1218,7 @@ function mostraCartao(m) {
     [t.fraco("tipo     "), t.texto(d.tipo)],
     [t.fraco("fonte    "), t.texto(d.fonte)],
   ];
-  if (d.aviso) linhas.push([t.fraco("aviso    "), t.texto(d.aviso)]);
+  for (const [rotulo, texto] of d.extras) linhas.push([t.fraco(rotulo.padEnd(9)), t.texto(texto)]);
   console.log(t.borda("  ╭" + "─".repeat(64)));
   for (const l of linhas) console.log(t.borda("  │ ") + l.join(""));
   console.log(t.borda("  ╰" + "─".repeat(64)));
@@ -1017,25 +1231,59 @@ function mostraCartao(m) {
 const BYTES_POR_PIXEL_QUADRO = 0.22;
 const GIF_LONGO_S = 15;
 
-function opcoesDoMenu(m, op) {
+/** Duração do que vai ser extraído: a do trecho, se houver recorte (F3), ou a do vídeo. */
+const duracaoUtil = (m, r = m.recorte) => (r ? r.fim - r.inicio : m.duracao);
+
+/** Largura, altura e fps efetivos do GIF (§5.4). */
+function dimensoesGif(m, op) {
+  const largura = Math.min(m.largura ?? op.gifLargura, op.gifLargura);
+  const altura = m.largura && m.altura ? Math.round((m.altura * largura) / m.largura) : largura;
+  return { largura, altura, fps: m.fps ? Math.min(m.fps, op.gifFps) : op.gifFps };
+}
+
+/** Tamanho esperado do GIF de `dur` segundos (§5.4), ou 0 sem duração. */
+function estimativaGif(m, op, dur) {
+  const g = dimensoesGif(m, op);
+  return dur ? g.largura * g.altura * g.fps * dur * BYTES_POR_PIXEL_QUADRO : 0;
+}
+
+/**
+ * Tamanho esperado do WEBM VP9 de `dur` segundos: a fração da fonte (com o
+ * teto do F1, o re-encode não passa do bitrate de vídeo dela), ou o bitrate
+ * informado mais o Opus de 64k. É um teto aproximado, não uma previsão.
+ */
+function estimativaWebm(m, dur) {
+  if (!dur) return 0;
+  if (m.tamanho && m.duracao) return (m.tamanho * dur) / m.duracao;
+  return m.kbpsVideo ? (m.kbpsVideo + 64) * 125 * dur : 0;
+}
+
+/** A fase de recorte faz sentido? (Precisa da duração, e o vídeo não pode ser curto demais.) */
+const podeRecortar = (m) => m.duracao >= 2;
+
+/** `telaCheia`: o aviso de vídeo longo sugere a tecla r (só existe na tela cheia). */
+function opcoesDoMenu(m, op, telaCheia = false) {
   // «720p» é o lado menor do quadro (Shorts são verticais).
   const ladoMenor = m.largura && m.altura ? Math.min(m.largura, m.altura) : m.altura;
   const alturaWebm = Math.min(ladoMenor ?? 720, 720);
-  const larguraGif = Math.min(m.largura ?? op.gifLargura, op.gifLargura);
-  const fpsGif = m.fps ? Math.min(m.fps, op.gifFps) : op.gifFps;
-  const alturaGif = m.largura && m.altura ? Math.round((m.altura * larguraGif) / m.largura) : larguraGif;
-  const estimativaGif = m.duracao ? larguraGif * alturaGif * fpsGif * m.duracao * BYTES_POR_PIXEL_QUADRO : 0;
-  const longo = m.duracao > GIF_LONGO_S;
+  const gif = dimensoesGif(m, op);
+  const dur = duracaoUtil(m);
+  const estimativa = estimativaGif(m, op, dur);
+  const longo = dur > GIF_LONGO_S;
+  // VP9/AV1 nativo com recorte: corte com -c copy, que começa no keyframe anterior.
+  const nativo = (codec) => (m.recorte ? `${codec}/Opus · corte sem perda` : `${codec}/Opus nativo · sem re-encode`);
   return [
     { id: "webm", rotulo: `WEBM · vp9 ${alturaWebm}p · tamanho mínimo`,
-      detalhe: m.vp9Nativo ? "VP9/Opus nativo · sem re-encode" : "re-encode H.264 → VP9/Opus" },
+      detalhe: m.vp9Nativo ? nativo("VP9") : "re-encode H.264 → VP9/Opus" },
     { id: "av1", rotulo: `WEBM · av1 ${alturaWebm}p · menor ainda`,
-      detalhe: m.av1Nativo ? "AV1/Opus nativo · sem re-encode" : "re-encode → AV1/Opus · mais lento" },
-    { id: "gif", rotulo: `GIF · ${larguraGif}px · ${fpsGif} fps`,
+      detalhe: m.av1Nativo ? nativo("AV1")
+        : m.svtAv1 ? "re-encode → AV1/Opus · SVT-AV1" : "re-encode → AV1/Opus · mais lento" },
+    { id: "gif", rotulo: `GIF · ${gif.largura}px · ${gif.fps} fps`,
       alerta: longo,
       detalhe: longo
-        ? `vídeo longo (${Math.round(m.duracao)} s) · GIF de ~${formataBytes(estimativaGif)}`
-        : `paleta otimizada · loop infinito${estimativaGif ? ` · ~${formataBytes(estimativaGif)}` : ""}` },
+        ? `${m.recorte ? "trecho" : "vídeo"} longo (${Math.round(dur)} s) · ` +
+          (telaCheia && podeRecortar(m) ? "r para recortar" : `GIF de ~${formataBytes(estimativa)}`)
+        : `paleta otimizada · loop infinito${estimativa ? ` · ~${formataBytes(estimativa)}` : ""}` },
     { id: "sair", rotulo: "Cancelar", detalhe: "" },
   ];
 }
@@ -1076,7 +1324,13 @@ function escolhe(opcoes) {
       else if (k.name === "down" || k.name === "j") sel = (sel + 1) % opcoes.length;
       else if (/^[1-9]$/.test(k.sequence ?? "") && Number(k.sequence) <= opcoes.length) sel = Number(k.sequence) - 1;
       else if (k.name === "return") return fim(opcoes[sel].id);
-      else if (k.name === "escape" || k.name === "q" || (k.ctrl && k.name === "c")) return fim("sair");
+      else if (k.ctrl && k.name === "c") { // como na tela cheia: Ctrl+C sai com 130 (§3.2)
+        fim("sair");
+        letreiro.para();
+        console.log(`  ${t.fraco("cancelado.")}\n`);
+        process.exit(130);
+      }
+      else if (k.name === "escape" || k.name === "q") return fim("sair");
       else return;
       desenha(false);
     };
@@ -1085,128 +1339,355 @@ function escolhe(opcoes) {
 }
 
 // ── Download com yt-dlp (progresso via --progress-template) ───────────────────
-async function baixa(ytdlp, url, args, rotulo, partes, aoFase) {
+/**
+ * Args do yt-dlp para baixar só o trecho `r` (F3, só no YouTube). Com
+ * --download-sections o yt-dlp chama `ffmpeg -ss <início> -t <dur> -i … -c copy`
+ * (uma vez só, vídeo e áudio juntos). O -c copy começa no keyframe anterior ao
+ * início, e o -copyts mantém no arquivo os tempos do vídeo original: o trecho
+ * pedido fica em [início, fim] no próprio arquivo, e o corte preciso é feito
+ * depois pelo ffmpeg que já roda (ver trechoDaFonte). Sem o -copyts, o
+ * keyframe viraria o tempo 0 e não daria para saber onde o trecho começa.
+ */
+const argsDoTrecho = (r) => ["--download-sections", `*${r.inicio}-${r.fim}`, "--downloader-args", "ffmpeg_o:-copyts"];
+
+/** No YouTube, o recorte é baixado só o trecho; no X, o vídeo inteiro (são curtos, e cortar HLS é frágil). */
+const baixaSoOTrecho = (m) => Boolean(m.recorte) && m.site === "youtube";
+
+/**
+ * `partes` = { n: downloads separados (vídeo + áudio = 2), item: mídia do post
+ * ou null, trecho: baixando só um trecho (o yt-dlp não manda progresso aí) }.
+ */
+async function baixa(ytdlp, url, args, rotulo, partes) {
   // Vídeo e áudio separados chegam como dois downloads seguidos; um total
   // novo na linha de progresso marca o começo da próxima parte.
   let parte = 1, totalAnterior = null;
+  // Com --download-sections quem baixa é o ffmpeg, e o yt-dlp só manda uma
+  // linha de progresso, já no fim: no lugar da barra, um spinner.
+  const giro = partes.trecho ? etapa("baixando o trecho…") : null;
   const r = await roda(ytdlp, [
     // --print deixa o yt-dlp em modo silencioso; --progress traz a barra de volta.
     ...args, "--no-playlist", "--no-warnings", "--newline", "--progress",
+    // Post com várias mídias (sem /video/N): sem isto o yt-dlp baixaria todas.
+    ...(partes.item ? ["--playlist-items", String(partes.item)] : []),
     "--progress-template", "download:@@%(progress.downloaded_bytes)s|%(progress.total_bytes,progress.total_bytes_estimate)s",
-    // Pelo mesmo motivo, as linhas «[VideoConvertor]» não aparecem: o gancho
-    // post_process marca o fim do download e o início do pós-processamento.
-    "--print", "post_process:@@FASE",
     "--print", "after_move:@@ARQ %(filepath)s",
     url,
   ], (linha) => {
     const p = linha.match(/^@@(\d+)\|(\d+(?:\.\d+)?)/);
-    if (p) {
-      if (totalAnterior !== null && p[2] !== totalAnterior && parte < partes) parte++;
-      totalAnterior = p[2];
-      const nome = partes > 1 ? `${rotulo} ${parte}/${partes}` : rotulo;
-      return progresso(nome, Number(p[1]) / Number(p[2]), formataBytes(Number(p[2])));
-    }
-    if (linha.startsWith("@@FASE")) aoFase?.();
+    if (!p || giro) return;
+    if (totalAnterior !== null && p[2] !== totalAnterior && parte < partes.n) parte++;
+    totalAnterior = p[2];
+    const nome = partes.n > 1 ? `${rotulo} ${parte}/${partes.n}` : rotulo;
+    progresso(nome, Number(p[1]) / Number(p[2]), formataBytes(Number(p[2])));
   });
   if (r.codigo !== 0) {
+    giro?.para();
     if (process.stdout.isTTY) process.stdout.write("\r\x1b[2K");
-    falha((r.erro.match(/ERROR:.*$/m) ?? ["yt-dlp falhou"])[0]);
+    falha(msgDoYtDlp(r.erro));
   }
   const arq = r.saida.match(/^@@ARQ (.+)$/m)?.[1]?.trim();
-  if (!arq || !fs.existsSync(arq)) falha("yt-dlp terminou, mas o arquivo final não foi encontrado.");
+  if (!arq || !fs.existsSync(arq)) { giro?.para(); falha("yt-dlp terminou, mas o arquivo final não foi encontrado."); }
+  giro?.para(`trecho baixado · ${formataBytes(fs.statSync(arq).size)}`);
   return arq;
 }
+
+/** start_time do arquivo (o tempo do primeiro pacote), ou null sem ffprobe. */
+async function inicioDoArquivo(arquivo) {
+  const r = await roda("ffprobe", ["-v", "error", "-show_entries", "format=start_time", "-of", "csv=p=0", arquivo]);
+  const s = Number.parseFloat(r.saida);
+  return r.codigo === 0 && Number.isFinite(s) ? s : null;
+}
+
+/**
+ * A fonte baixada e o pedaço dela que vai para a saída:
+ * - `de` é onde o trecho começa, no tempo do arquivo (o pts que o ffprobe
+ *   mostra, que é o que pacotesDoVideo devolve);
+ * - `zero` é o start_time do arquivo, de onde o -ss de entrada do ffmpeg conta;
+ * - `dur` é a duração do trecho (ou do vídeo, sem recorte).
+ * Sem recorte, `de` = `zero` e nada é cortado.
+ */
+async function trechoDaFonte(arquivo, m) {
+  const zero = await inicioDoArquivo(arquivo);
+  if (!m.recorte) return { arquivo, zero: zero ?? 0, de: zero ?? 0, dur: m.duracao, recortado: false };
+  if (zero === null) falha("ffprobe não leu o início do arquivo baixado; sem ele não dá para recortar.");
+  // Trecho do YouTube (-copyts): o tempo do arquivo já é o do vídeo. X (vídeo
+  // inteiro): o tempo 0 do vídeo é o start_time do arquivo.
+  const de = baixaSoOTrecho(m) ? m.recorte.inicio : zero + m.recorte.inicio;
+  return { arquivo, zero, de, dur: duracaoUtil(m), recortado: true };
+}
+
+/** Args de entrada do ffmpeg (antes do -i) que cortam o trecho `f`; sem recorte, nenhum. */
+const corteDe = (f) => (f.recortado
+  ? ["-ss", (f.de - f.zero).toFixed(3), "-t", f.dur.toFixed(3)]
+  : []);
 
 // Nome do arquivo (§3.3). No X o «título» é o texto do post (longo, com emoji
 // e hashtags), então vai usuário_id; no YouTube, o título e o id.
 const MODELO_NOME = { x: "%(uploader_id)s_%(id)s", youtube: "%(title).60s [%(id)s]" };
 
-/** Mesmo nome do MODELO_NOME, montado aqui porque o GIF é gerado pelo ffmpeg, não pelo yt-dlp. */
-function nomeDoGif(m) {
-  if (m.site !== "youtube") return `${m.info.uploader_id ?? "x"}_${m.info.id}`;
-  // Tira o que o Windows não aceita em nomes de arquivo.
-  const titulo = [...(m.info.title ?? "")].slice(0, 60).join("")
-    .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").replace(/[. ]+$/, "").trim();
-  return titulo ? `${titulo} [${m.info.id}]` : m.info.id;
+/** Pasta temporária apagada no fim, inclusive em erro ou Ctrl+C (§5.3). */
+function criaTemporaria() {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gdm-yoinks-"));
+  temporarias.add(tmp);
+  return tmp;
+}
+function apagaTemporaria(tmp) {
+  fs.rmSync(tmp, { recursive: true, force: true });
+  temporarias.delete(tmp);
 }
 
-/** `sabor` é uma chave de CODECS_WEBM: "webm" (VP9) ou "av1". */
-async function baixaWebm(ytdlp, url, pasta, m, sabor = "webm") {
-  let sp = null;
-  const codec = CODECS_WEBM[sabor];
-  const nativo = sabor === "av1" ? m.av1Nativo : m.vp9Nativo;
-  const arq = await baixa(ytdlp, url, [
-    "-f", "bv*+ba/b", "-S", `res:720,vcodec:${codec.sort},acodec:opus,+size`,
-    // --recode-video webm não faz nada se o arquivo já sai webm. No AV1 sem
-    // fonte AV1, a junção poderia dar um webm VP9 (YouTube) e o re-encode
-    // seria pulado; juntar em mkv garante que ele aconteça.
-    "--merge-output-format", sabor === "av1" && !nativo ? "mkv" : "webm/mkv",
-    "--recode-video", "webm",
-    "--postprocessor-args",
-    // O scale só reduz quando o lado menor passa de 720 (fontes únicas, como GIFs
-    // do X, não têm uma versão menor para o -S escolher).
-    "VideoConvertor:-vf \"scale=w='if(lte(iw,ih),min(iw,720),-2)':h='if(gt(iw,ih),min(ih,720),-2)'\"" +
-      ` ${codec.encoder} -c:a libopus -b:a 64k`,
-    // Sufixo no AV1 para não colidir com o WEBM VP9 do mesmo post (o yt-dlp
-    // pularia o download achando que o arquivo já existe).
-    "-o", path.join(pasta, `${MODELO_NOME[m.site]}${sabor === "av1" ? "_av1" : ""}.%(ext)s`),
-  ], "baixando", m.partes, () => {
-    if (sp) return;
-    sp = etapa(nativo ? "juntando vídeo e áudio…" : `re-encodando para ${codec.nome}/Opus…`);
+/** Move um arquivo, copiando quando origem e destino estão em discos diferentes. */
+function move(de, para) {
+  try { fs.renameSync(de, para); }
+  catch (e) {
+    if (e.code !== "EXDEV") throw e;
+    fs.copyFileSync(de, para);
+    fs.rmSync(de, { force: true });
+  }
+}
+
+/**
+ * Roda o ffmpeg com `-progress pipe:1` e mostra a barra `rotulo` (D1). A
+ * fração vem de out_time / duração; `extra(velocidade)` monta o texto ao lado
+ * da barra, com o «speed=» do ffmpeg (ex.: «1.6x»).
+ */
+async function ffmpegComProgresso(args, duracao, rotulo, extra = () => "") {
+  const duracaoUs = (duracao ?? 0) * 1e6;
+  let velocidade = "";
+  const r = await roda("ffmpeg", ["-y", "-v", "error", ...args.slice(0, -1),
+    "-progress", "pipe:1", "-nostats", args.at(-1)], (linha) => {
+    const v = linha.match(/^speed=\s*([\d.]+x)/);
+    if (v) velocidade = v[1];
+    const us = linha.match(/^out_time_us=(\d+)/);
+    if (us && duracaoUs) progresso(rotulo, Math.min(1, Number(us[1]) / duracaoUs), extra(velocidade));
   });
-  sp?.para(nativo ? "pronto" : "re-encode concluído");
-  return arq;
+  if (r.codigo !== 0) falha(`ffmpeg falhou: ${r.erro.trim().split("\n").at(-1)}`);
+  if (duracaoUs) progresso(rotulo, 1, extra(velocidade));
+}
+
+/** Pacotes da trilha de vídeo como [tempo em s, bytes], ou [] sem ffprobe. */
+async function pacotesDoVideo(arquivo) {
+  const r = await roda("ffprobe", ["-v", "error", "-select_streams", "v:0",
+    "-show_entries", "packet=pts_time,size", "-of", "csv=p=0", arquivo]);
+  if (r.codigo !== 0) return [];
+  return r.saida.split(/\r?\n/).map((l) => l.split(",").map(Number)).filter(([, b]) => b > 0);
+}
+const somaBytes = (pacotes, de = -Infinity, ate = Infinity) =>
+  pacotes.reduce((s, [t, b]) => (t >= de && t < ate ? s + b : s), 0);
+
+/**
+ * Bitrate real do vídeo de um arquivo local, em kbps: soma o tamanho dos
+ * pacotes da trilha de vídeo (o mkv juntado pelo yt-dlp não guarda o bitrate
+ * por trilha). Com `de`, só os pacotes de [de, de + dur), no tempo do arquivo
+ * (o trecho do recorte); sem, todos. Sem ffprobe ou sem duração, devolve `reserva`.
+ */
+async function kbpsDoVideo(arquivo, dur, reserva, de) {
+  if (!dur) return reserva;
+  const pacotes = await pacotesDoVideo(arquivo);
+  const bytes = de === undefined ? somaBytes(pacotes) : somaBytes(pacotes, de, de + dur);
+  return bytes ? Math.round((bytes * 8) / 1000 / dur) : reserva;
+}
+
+/** Bitrate de vídeo do trecho `f` da fonte (ver trechoDaFonte). */
+const kbpsDoTrecho = (f, m) => kbpsDoVideo(f.arquivo, f.dur, m.kbpsVideo, f.recortado ? f.de : undefined);
+
+/**
+ * Prevê o bitrate de vídeo (kbps) do trecho `f` inteiro codificado com `args`:
+ * codifica as amostras e compara com os MESMOS trechos da fonte. A razão
+ * codificado/fonte é bem mais estável que o bitrate absoluto da amostra,
+ * porque a fonte varia muito ao longo do vídeo (Puzzle: de 953 a 2409 kbps
+ * por trecho de 5 s). Erra para cima (cada amostra começa num quadro-chave).
+ * As janelas estão no tempo do arquivo; o -ss conta a partir do start_time.
+ */
+async function prevêKbps(f, pacotesFonte, kbpsFonte, args, tmp) {
+  const janelas = f.dur >= AMOSTRA_S * POSICOES_AMOSTRA.length * 2
+    ? POSICOES_AMOSTRA.map((p) => f.de + Math.max(0, f.dur * p - AMOSTRA_S / 2))
+    : [f.de];
+  const dur = janelas.length > 1 ? AMOSTRA_S : f.dur;
+  let codificado = 0, original = 0;
+  for (const ini of janelas) {
+    const saida = path.join(tmp, "amostra.webm");
+    const r = await roda("ffmpeg", ["-y", "-v", "error", "-ss", (ini - f.zero).toFixed(3), "-t", String(dur), "-i", f.arquivo,
+      "-vf", ESCALA_720, ...args, "-an", saida]);
+    if (r.codigo !== 0) return null;
+    codificado += somaBytes(await pacotesDoVideo(saida));
+    original += somaBytes(pacotesFonte, ini, ini + dur);
+  }
+  return codificado && original ? Math.round((kbpsFonte * codificado) / original) : null;
+}
+
+/**
+ * CRF do libaom que acerta o `alvo` (kbps). Mede a CRF_AV1; se passar do
+ * alvo, mede também a CRF_AV1_SONDA e interpola: o bitrate cai de forma
+ * exponencial com o CRF, então log(kbps) é uma reta no CRF.
+ */
+async function crfPorAmostras(codec, f, kbpsFonte, alvo, tmp) {
+  const pacotes = await pacotesDoVideo(f.arquivo);
+  if (!pacotes.length || !f.dur) return CRF_AV1;
+  const prevê = (crf) => prevêKbps(f, pacotes, kbpsFonte, [...codec.encoder, ...codec.crf(crf)], tmp);
+
+  let e = etapa(`testando amostras a crf ${CRF_AV1}…`);
+  const p1 = await prevê(CRF_AV1);
+  if (!p1 || p1 <= alvo) {
+    e.para(p1 ? `crf ${CRF_AV1}: ~${p1} kbps previstos, dentro do alvo` : `amostras falharam; crf ${CRF_AV1}`);
+    return CRF_AV1;
+  }
+  e.para(`crf ${CRF_AV1}: ~${p1} kbps previstos, acima do alvo de ${alvo}`);
+  e = etapa(`testando amostras a crf ${CRF_AV1_SONDA}…`);
+  const p2 = await prevê(CRF_AV1_SONDA);
+  let crf = CRF_AV1_MAX;
+  if (p2 && p2 < p1) {
+    const exato = CRF_AV1 + ((CRF_AV1_SONDA - CRF_AV1) * Math.log(alvo / p1)) / Math.log(p2 / p1);
+    crf = Math.min(CRF_AV1_MAX, Math.max(CRF_AV1, Math.ceil(exato)));
+  }
+  e.para(`crf ${CRF_AV1_SONDA}: ~${p2 ?? "?"} kbps · usando crf ${crf}${crf === CRF_AV1_MAX ? " (limite de qualidade)" : ""}`);
+  return crf;
+}
+
+/** `sabor` é "webm" (VP9) ou "av1". */
+async function baixaWebm(ytdlp, url, pasta, m, sabor = "webm") {
+  const codec = codecDoSabor(sabor, m);
+  const nativo = sabor === "av1" ? m.av1Nativo : m.vp9Nativo;
+  const tmp = criaTemporaria();
+  try {
+    // O yt-dlp só baixa e junta (em webm quando os codecs permitem; senão,
+    // em mkv). O re-encode é feito aqui pelo ffmpeg, e não pelo
+    // --recode-video, para ter progresso real (D1) e medir a fonte antes (F1).
+    const fonte = await baixa(ytdlp, url, [
+      "-f", "bv*+ba/b", "-S", `res:720,vcodec:${codec.sort},acodec:opus,+size`,
+      "--merge-output-format", "webm/mkv",
+      ...(baixaSoOTrecho(m) ? argsDoTrecho(m.recorte) : []),
+      // Sufixo do trecho para não sobrescrever a versão inteira (F3), e no AV1
+      // para não colidir com o WEBM VP9 do mesmo post.
+      "-o", path.join(tmp, `${MODELO_NOME[m.site]}${sufixoDoTrecho(m.recorte)}${sabor === "av1" ? "_av1" : ""}.%(ext)s`),
+    ], "baixando", { n: m.partes, item: m.total > 1 ? 1 : null, trecho: baixaSoOTrecho(m) });
+    garanteNovaLinha();
+    const destino = path.join(pasta, `${path.parse(fonte).name}.webm`);
+
+    // Fonte já no codec pedido e já em webm: só move, sem re-encode. Nativo
+    // em mkv (áudio que não é Opus) copia o vídeo e converte só o áudio.
+    if (nativo && path.extname(fonte) === ".webm" && !m.recorte) { move(fonte, destino); return destino; }
+
+    const f = await trechoDaFonte(fonte, m);
+    const corte = corteDe(f);
+    // Nativo com recorte: -c copy, sem perda e sem re-encode. O corte começa
+    // no keyframe anterior ao início (até alguns segundos antes); o arquivo
+    // também sai com o tempo começando do zero, e não do tempo do vídeo.
+    if (nativo && path.extname(fonte) === ".webm") {
+      await ffmpegComProgresso([...corte, "-i", fonte, "-c", "copy", destino], f.dur, "cortando", () => "sem perda");
+      return destino;
+    }
+
+    const encoda = (video, rotulo, nomeCodec) => ffmpegComProgresso(
+      [...corte, "-i", fonte, ...video, "-c:a", "libopus", "-b:a", "64k", destino],
+      f.dur, rotulo, (vel) => `${nomeCodec}${vel ? " " + vel : ""}`);
+    if (nativo) { await encoda(["-c:v", "copy"], "re-encodando", "Opus"); return destino; }
+
+    const e = etapa("medindo o bitrate da fonte…");
+    const kbps = await kbpsDoTrecho(f, m);
+    const alvo = kbps ? Math.round(kbps * codec.fatorAlvo) : 0;
+    e.para(!kbps ? "sem bitrate da fonte; qualidade constante"
+      : codec.escolheCrf ? `fonte com ${kbps} kbps de vídeo; alvo de ${alvo} kbps`
+      : `teto de ${alvo} kbps${codec.fatorAlvo < 1 ? ` (${Math.round(codec.fatorAlvo * 100)}% da fonte)` : " (bitrate de vídeo da fonte)"}`);
+
+    if (!codec.escolheCrf) {
+      await encoda(["-vf", ESCALA_720, ...codec.encoder, ...(alvo ? codec.teto(alvo) : codec.semTeto)],
+        "re-encodando", codec.nome);
+      return destino;
+    }
+
+    // libaom: CRF escolhido por amostras (ver crfPorAmostras).
+    let crf = alvo ? await crfPorAmostras(codec, f, kbps, alvo, tmp) : CRF_AV1;
+    await encoda(["-vf", ESCALA_720, ...codec.encoder, ...codec.crf(crf)], "re-encodando", `${codec.nome} crf ${crf}`);
+
+    // Rede de segurança: a previsão errou e o vídeo passou da fonte? Refaz
+    // uma vez com o CRF 6 pontos acima (≈ −30% de bitrate no Puzzle).
+    if (kbps) {
+      const saiu = await kbpsDoVideo(destino, f.dur, m.kbpsVideo); // a saída já é só o trecho
+      if (saiu > kbps) {
+        crf = Math.min(63, crf + 6);
+        garanteNovaLinha();
+        etapa("").para(`${saiu} kbps passou da fonte; refazendo com crf ${crf}`);
+        await encoda(["-vf", ESCALA_720, ...codec.encoder, ...codec.crf(crf)], "refazendo", `${codec.nome} crf ${crf}`);
+      }
+    }
+    return destino;
+  } finally {
+    apagaTemporaria(tmp);
+  }
 }
 
 async function baixaGif(ytdlp, url, pasta, m, op) {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gdm-yoinks-"));
+  const tmp = criaTemporaria();
   try {
+    // A fonte já sai com o nome do §3.3, tratado pelo próprio yt-dlp; assim o
+    // GIF tem exatamente o mesmo nome do WEBM do mesmo vídeo.
     const mp4 = await baixa(ytdlp, url, [
       "-f", "bv*/b", "-S", "res:720,+size",
-      "-o", path.join(tmp, "fonte.%(ext)s"),
-    ], "baixando", 1);
+      ...(baixaSoOTrecho(m) ? argsDoTrecho(m.recorte) : []),
+      "-o", path.join(tmp, `${MODELO_NOME[m.site]}${sufixoDoTrecho(m.recorte)}.%(ext)s`),
+    ], "baixando", { n: 1, item: m.total > 1 ? 1 : null, trecho: baixaSoOTrecho(m) });
     garanteNovaLinha();
 
-    const destino = path.join(pasta, `${nomeDoGif(m)}.gif`);
-    const fps = m.fps ? Math.min(m.fps, op.gifFps) : op.gifFps;
+    const destino = path.join(pasta, `${path.parse(mp4).name}.gif`);
+    // O GIF sempre re-codifica, então o corte do recorte sai no quadro exato.
+    const f = await trechoDaFonte(mp4, m);
+    const fps = dimensoesGif(m, op).fps;
     // 1ª passada: gera a paleta de 256 cores do próprio vídeo; 2ª: aplica.
     // stats_mode=diff prioriza as cores do que se mexe; diff_mode=rectangle
     // só redesenha a área que mudou entre quadros (GIF menor).
     const filtro =
       `fps=${fps},scale='min(${op.gifLargura},iw)':-1:flags=lanczos,split[a][b];` +
       `[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle`;
-    const duracaoUs = (m.duracao ?? 0) * 1e6;
-    const r = await roda("ffmpeg", ["-y", "-v", "error", "-i", mp4, "-vf", filtro, "-loop", "0",
-      "-progress", "pipe:1", "-nostats", destino], (linha) => {
-      const us = linha.match(/^out_time_us=(\d+)/);
-      if (us && duracaoUs) progresso("convertendo", Number(us[1]) / duracaoUs);
-    });
-    if (r.codigo !== 0) falha(`ffmpeg falhou: ${r.erro.trim().split("\n").at(-1)}`);
-    if (duracaoUs) progresso("convertendo", 1);
+    await ffmpegComProgresso([...corteDe(f), "-i", mp4, "-vf", filtro, "-loop", "0", destino], f.dur, "convertendo");
     return destino;
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
+    apagaTemporaria(tmp);
   }
 }
 
 // ── Principal ─────────────────────────────────────────────────────────────────
+/**
+ * Recorte com que a extração começa (F3): o das opções --inicio/--fim/--duracao,
+ * conferido contra a duração (fora dela, código 2). Sem opções, o &t= do link
+ * do YouTube vira o início quando o formato já é GIF (--formato gif, sem menu);
+ * na tela cheia, com menu, ele só fica guardado para preencher a fase de
+ * recorte, sem recortar sozinho.
+ */
+function recorteInicial(m, op, url, comOpcoes, telaCheia) {
+  if (comOpcoes) {
+    const r = recorteDasOpcoes(op.trecho, m.duracao);
+    if (r.erro) falha(r.erro, 2);
+    if (r.recorte) return r.recorte;
+  }
+  const doLink = tempoDoLink(url);
+  if (!doLink || !(doLink < m.duracao)) return null;
+  if (op.formato === "gif") return { inicio: doLink, fim: Math.min(m.duracao, doLink + DURACAO_PADRAO_S) };
+  if (telaCheia && !op.formato) m.inicioDoLink = doLink;
+  return null;
+}
+
 async function main() {
   const op = leArgs(process.argv.slice(2));
   fs.mkdirSync(op.saida, { recursive: true });
   const ytdlp = achaYtDlp();
   if (!op.url && !process.stdin.isTTY) falha(MSG_SEM_URL, 2);
   const promessaClip = op.url ? null : leAreaDeTransferencia();
+  // Lido em paralelo com o resto do início; só é preciso depois da análise (F9).
+  const promessaEncoders = leEncoders();
 
   const logo = leLogo();
   if (logo && process.stdout.isTTY && process.stdin.isTTY && !semCor && TelaCheia.cabe(logo.desenho))
-    return mainTelaCheia(op, ytdlp, promessaClip, logo);
+    return mainTelaCheia(op, ytdlp, promessaClip, logo, promessaEncoders);
 
   cabecalho(logo);
   if (!op.url) op.url = await pedeUrl(promessaClip);
 
   const sp = spinner("analisando o link…");
   const m = await analisa(ytdlp, op.url);
+  m.svtAv1 = /\blibsvtav1\b/.test(await promessaEncoders);
   sp.para();
+  m.recorte = recorteInicial(m, op, op.url, true, false);
   mostraCartao(m);
 
   const escolha = op.formato ?? await escolhe(opcoesDoMenu(m, op));
@@ -1229,7 +1710,7 @@ async function main() {
  * ao campo de URL para a próxima; Esc sai. Os arquivos gerados vão para a tela
  * normal no fim (ver TelaCheia.encerra).
  */
-async function mainTelaCheia(op, ytdlp, promessaClip, logo) {
+async function mainTelaCheia(op, ytdlp, promessaClip, logo, promessaEncoders) {
   tela = new TelaCheia(logo.desenho, logo.binario ?? emBinario("G.D.M. Extractor"));
   tela.abre();
   // Sair do campo de URL depois de já ter extraído algo não é «cancelar».
@@ -1239,15 +1720,27 @@ async function mainTelaCheia(op, ytdlp, promessaClip, logo) {
   };
 
   let url = op.url;
-  for (;;) {
+  for (let rodada = 0; ; rodada++) {
     if (url) tela.analisando(url);
     else url = await tela.pedeUrl(promessaClip);
     if (!url) return sai(false);
 
     const m = await analisa(ytdlp, url);
+    m.svtAv1 = /\blibsvtav1\b/.test(await promessaEncoders);
+    // --inicio/--fim/--duracao valem só para o primeiro link; os seguintes
+    // recortam pela tecla r.
+    m.recorte = recorteInicial(m, op, url, rodada === 0, true);
     tela.mostraCartao(m);
 
-    const escolha = op.formato ?? await tela.escolhe(opcoesDoMenu(m, op));
+    // A tecla r do menu abre a fase de recorte e volta ao menu (F3).
+    let escolha = op.formato;
+    while (!escolha) {
+      escolha = await tela.escolhe(opcoesDoMenu(m, op, true), podeRecortar(m));
+      if (escolha !== "recortar") break;
+      m.recorte = await tela.recorta(m, op);
+      tela.mostraCartao(m);
+      escolha = null;
+    }
     if (escolha === "sair") return sai(true);
 
     tela.baixando();
