@@ -98,12 +98,18 @@ function msgDoYtDlp(erro, padrao = "yt-dlp falhou") {
 /** Roda um programa e devolve { codigo, saida, erro }. `aoLer` recebe cada linha. */
 function roda(cmd, args, aoLer) {
   return new Promise((resolve) => {
-    const p = spawn(cmd, args, { windowsHide: true });
+    // No Windows, o yt-dlp (Python) escreve no pipe na página de código do
+    // console (cp1252): caracteres fora dela somem. O «:» de um título vira
+    // «：» no nome do arquivo, e o caminho impresso não bateria com o do disco.
+    const env = { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" };
+    const p = spawn(cmd, args, { windowsHide: true, env });
     filhos.add(p);
     p.on("exit", () => filhos.delete(p));
+    // setEncoding junta os bytes de um caractere que chegue dividido em dois pedaços.
+    p.stdout.setEncoding("utf8");
+    p.stderr.setEncoding("utf8");
     let saida = "", erro = "", resto = "";
-    const linhas = (buf, guarda) => {
-      const s = buf.toString();
+    const linhas = (s, guarda) => {
       guarda(s);
       if (!aoLer) return;
       resto += s;
