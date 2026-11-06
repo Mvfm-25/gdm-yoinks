@@ -1,0 +1,28 @@
+{
+  "node": {
+    "versao": "22.23.4",
+    "url": "https://nodejs.org/dist/v22.23.4/node-v22.23.4-win-x64.zip",
+    "sha256": "cbc74b5e0982c9dbb41525fd8fb5dcd32fbee237863f7829072f4639a1ce5f20",
+    "fonte": "https://nodejs.org/dist/v22.23.4/node-v22.23.4.tar.gz"
+  },
+  "ytdlp": {
+    "versao": "2026.10.26",
+    "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.10.26/yt-dlp.exe",
+    "sha256": "f5389d3698ecde4ef06f4e6b1ce0294fe9ac1396228c8990b8d3416d6d177a7d",
+    "licenca": {
+      "url": "https://raw.githubusercontent.com/yt-dlp/yt-dlp/2026.10.26/LICENSE",
+      "sha256": "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c"
+    },
+    "fonte": "https://github.com/yt-dlp/yt-dlp/tree/2026.10.26"
+  },
+  "ffmpeg": {
+    "versao": "8.1.3-27-g8dca1586f4",
+    "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-31-12-59/ffmpeg-n8.1.3-27-g8dca1586f4-win64-gpl-shared-8.1.zip",
+    "sha256": "3adc00b67118a8c4bdd6624a000e139df283b1eeb8b126fcec4849bd5b778dd4",
+    "licencaNoZip": "/LICENSE.txt",
+    "autor": "BtbN/FFmpeg-Builds (shared)",
+    "fonte": "https://github.com/FFmpeg/FFmpeg/tree/8dca1586f4",
+    "scripts": "https://github.com/BtbN/FFmpeg-Builds/tree/autobuild-2026-10-31-12-59"
+  },
+  "encoders": ["libvpx-vp9", "libaom-av1", "libsvtav1", "libopus", "gif"]
+}

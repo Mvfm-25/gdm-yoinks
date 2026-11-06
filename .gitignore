@@ -1,0 +1,18 @@
+# Dependências e artefatos
+node_modules/
+
+# Build do instalador (installer/build.ps1)
+installer/cache/
+installer/stage/
+installer/stage-win7/
+installer/saida/
+
+# Pacote do Arch (makepkg)
+installer/linux/pkg/
+installer/linux/src/
+installer/linux/*.pkg.tar.*
+installer/linux/*.tar.gz
+
+# Ferramentas locais
+.superpowers/
+*.log

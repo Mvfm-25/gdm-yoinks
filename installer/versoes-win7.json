@@ -1,0 +1,42 @@
+{
+  "node": {
+    "versao": "20.19.2",
+    "url": "https://raw.githubusercontent.com/vladimir-andreevich/node.js-windows-7/181c7bf8d5d1173cc7f4649a45da35ceda5aeff3/v20/node-v20.19.2-win-x64.zip",
+    "sha256": "bf2ddbd115c3775dc997cef1776f73695bae59b266b6f3bf9b9ebce22a06a132",
+    "fonte": "https://github.com/vladimir-andreevich/node.js-windows-7/tree/181c7bf8d5d1173cc7f4649a45da35ceda5aeff3/v20/node-v20.19.2",
+    "projeto": "vladimir-andreevich/node.js-windows-7 (Node.js com backport para o Windows 7)"
+  },
+  "ytdlp": {
+    "versao": "2026.10.29.091737",
+    "url": "https://github.com/nicolaasjan/yt-dlp/releases/download/2026.10.29.091737/yt-dlp_win7.exe",
+    "sha256": "a8b176da9176a8c44a38a5653e0bdd36b1892b618efb53dbdd869bbf3a84b6ae",
+    "licenca": {
+      "url": "https://raw.githubusercontent.com/nicolaasjan/yt-dlp/2026.10.29.091737/LICENSE",
+      "sha256": "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c",
+      "arquivo": "yt-dlp-win7-LICENSE"
+    },
+    "fonte": "https://github.com/nicolaasjan/yt-dlp/tree/2026.10.29.091737",
+    "projeto": "nicolaasjan/yt-dlp (yt-dlp com builds para o Windows 7)"
+  },
+  "quickjs": {
+    "versao": "0.18.0",
+    "url": "https://github.com/quickjs-ng/quickjs/releases/download/v0.18.0/qjs-windows-x86_64.exe",
+    "sha256": "ff03398d74ea6e6bd3a8e58058f7003225abcac229d7d57775b7aaae812a49c7",
+    "licenca": {
+      "url": "https://raw.githubusercontent.com/quickjs-ng/quickjs/v0.18.0/LICENSE",
+      "sha256": "96f73f9d2a16c21a36b418f06073be26e7d6d5e7c1bc99756b21a4f2c74ef171",
+      "arquivo": "quickjs-ng-v0.18.0-LICENSE"
+    },
+    "fonte": "https://github.com/quickjs-ng/quickjs/tree/v0.18.0"
+  },
+  "ffmpeg": {
+    "versao": "8.1.2-essentials",
+    "url": "https://github.com/GyanD/codexffmpeg/releases/download/8.1.2/ffmpeg-8.1.2-essentials_build.zip",
+    "sha256": "db580001caa24ac104c8cb856cd113a87b0a443f7bdf47d8c12b1d740584a2ec",
+    "licencaNoZip": "/LICENSE",
+    "fonte": "https://github.com/FFmpeg/FFmpeg/commit/38b88335f9",
+    "scripts": "https://www.gyan.dev/ffmpeg/builds/ (configuração do build no README.txt do zip)",
+    "autor": "gyan.dev (essentials, estático)"
+  },
+  "encoders": ["libvpx-vp9", "libaom-av1", "libopus", "gif"]
+}

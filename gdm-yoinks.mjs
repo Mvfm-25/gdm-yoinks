@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 // gdm-yoinks — protótipo. Baixa mídia do X/Twitter e do YouTube como WEBM (VP9 ou AV1, com Opus,
 // até 720p, menor arquivo) ou como GIF de verdade (convertido do vídeo).
-// Sem dependências: Node ≥ 18, yt-dlp e ffmpeg/ffprobe no PATH.
+// Sem dependências npm: Node ≥ 18, yt-dlp e ffmpeg/ffprobe (do PATH ou embutidos pelo
+// instalador; ver ferramentas.mjs).
 //
 // Uso: gdm-extractor <url> [-o pasta] [--formato webm|av1|gif] [--inicio t] [--fim t | --duracao t]
+//      gdm-extractor --diagnostico | --configurar [--mostra]
 // (gdm-yoinks é o nome do projeto; gdm-extractor, o do comando.)
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -15,6 +17,11 @@ import {
   DURACAO_PADRAO_S, MIN_TRECHO_S, leTempo, formataTempo, sufixoDoTrecho, textoDoTrecho, tempoDoLink,
   recorteDasOpcoes, movePonta,
 } from "./tempo.mjs";
+import {
+  resolveFerramentas, avaliaEncoders, runtimeJs, argsJsRuntime, ytDlpDesatualizado, dicaAtualizacao,
+  terminalLimitado, windowsAntesDo10,
+} from "./ferramentas.mjs";
+import { caminhoConfig, leConfig, aplicaConfig, mesclaConfig, serializaConfig, linhasDaConfig } from "./config.mjs";
 
 const VERSAO = "0.1.0";
 
@@ -36,7 +43,10 @@ const PALETA = {
   pico: "#FFFFFF",
 };
 
-const semCor = "NO_COLOR" in process.env || !process.stdout.isTTY;
+// Terminal limitado (Windows antes do 1809, console do Linux, TERM=dumb): sem
+// cores e sem tela cheia, no modo linha (Instalador-Implement.md, seção 9).
+const semCor = "NO_COLOR" in process.env || !process.stdout.isTTY
+  || terminalLimitado({ plataforma: process.platform, release: os.release(), env: process.env });
 const rgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)).join(";");
 const cor = (hex, s) => (semCor ? s : `\x1b[38;2;${rgb(hex)}m${s}\x1b[39m`);
 const fundo = (hex, s) => (semCor ? s : `\x1b[48;2;${rgb(hex)}m${s}\x1b[49m`);
@@ -124,15 +134,144 @@ function roda(cmd, args, aoLer) {
   });
 }
 
-function achaYtDlp() {
-  const doYoinks = path.join(os.homedir(), ".yoinks", "bin", "yt-dlp.exe");
-  return fs.existsSync(doYoinks) && !temNoPath("yt-dlp") ? doYoinks : "yt-dlp";
+// ── Ferramentas e configuração ────────────────────────────────────────────────
+// Ordem de busca e regras em ferramentas.mjs e config.mjs (Instalador-Implement.md, seção 2).
+const DIR_APP = path.dirname(fileURLToPath(import.meta.url));
+const ARQ_CONFIG = caminhoConfig({ plataforma: process.platform, env: process.env, home: os.homedir() });
+
+/** { config, aviso, existe } do config.json. Nunca falha por causa dele. */
+function carregaConfig() {
+  let texto = null;
+  try { texto = fs.readFileSync(ARQ_CONFIG, "utf8"); } catch {}
+  return { ...leConfig(texto), existe: texto != null };
 }
 
-function temNoPath(nome) {
-  const exts = process.platform === "win32" ? [".exe", ".cmd", ""] : [""];
-  return (process.env.PATH ?? "").split(path.delimiter).some((d) =>
-    exts.some((e) => fs.existsSync(path.join(d, nome + e))));
+function gravaConfig(mudancas) {
+  const nova = mesclaConfig(carregaConfig().config, mudancas);
+  fs.mkdirSync(path.dirname(ARQ_CONFIG), { recursive: true });
+  fs.writeFileSync(ARQ_CONFIG, serializaConfig(nova));
+}
+
+const ehArquivo = (p) => { try { return fs.statSync(p).isFile(); } catch { return false; } };
+
+/** Contexto real para o ferramentas.mjs. */
+const contextoFerramentas = (config) => ({
+  plataforma: process.platform, env: process.env, config, dirApp: DIR_APP, home: os.homedir(),
+  existe: ehArquivo,
+  executavel: (p) => { try { fs.accessSync(p, fs.constants.X_OK); return ehArquivo(p); } catch { return false; } },
+  execPath: process.execPath, versaoNode: process.versions.node,
+});
+
+/** Ferramentas resolvidas: { ytdlp, ffmpeg, ffprobe }, cada uma { caminho, origem }. O main preenche. */
+let F = resolveFerramentas(contextoFerramentas({}));
+
+/**
+ * Argumentos que toda chamada do yt-dlp leva: o ffmpeg resolvido (sem ele, um
+ * yt-dlp embutido não acharia o ffmpeg embutido) e o runtime JS do YouTube,
+ * se o yt-dlp for novo o bastante para a opção. É uma promessa porque depende
+ * do `yt-dlp --version`, lido em paralelo com o início.
+ */
+let promessaExtrasYtDlp = Promise.resolve([]);
+
+async function versaoDe(cmd, args = ["-version"]) {
+  const r = await roda(cmd, args);
+  if (r.codigo !== 0) return null;
+  const linha = r.saida.trim().split(/\r?\n/)[0];
+  return linha.match(/version (\S+)/)?.[1] ?? linha.split(/\s/)[0];
+}
+
+const versaoYtDlp = () => versaoDe(F.ytdlp.caminho, ["--version"]);
+
+function extrasYtDlp(versaoYt, config) {
+  const ffmpeg = F.ffmpeg.origem === "ausente" ? [] : ["--ffmpeg-location", path.dirname(F.ffmpeg.caminho)];
+  return [...ffmpeg, ...argsJsRuntime(runtimeJs(contextoFerramentas(config)), versaoYt)];
+}
+
+/** Avisos do início (config inválida, yt-dlp velho), mostrados no modo linha ou ao sair da tela cheia. */
+async function avisosDoInicio(op, avisoConfig, promessaVersao) {
+  const avisos = avisoConfig ? [avisoConfig] : [];
+  const versao = await promessaVersao;
+  if (op.verificarYtDlp !== false && ytDlpDesatualizado(versao))
+    avisos.push(`yt-dlp ${versao} pode estar desatualizado; ${dicaAtualizacao(F.ytdlp,
+      { windowsAntigo: windowsAntesDo10({ plataforma: process.platform, release: os.release() }) })}.`);
+  return avisos;
+}
+
+// ── --diagnostico (Instalador-Implement.md, seção 2.2) ────────────────────────
+async function diagnostico(config) {
+  const [vYt, vFf, vFp, encoders] = await Promise.all([
+    versaoYtDlp(), versaoDe(F.ffmpeg.caminho), versaoDe(F.ffprobe.caminho), leEncoders(),
+  ]);
+  const js = runtimeJs(contextoFerramentas(config));
+  const jsUsado = argsJsRuntime(js, vYt).length > 0;
+  const enc = avaliaEncoders(encoders);
+  const ok = Boolean(vYt && vFf && vFp && enc.ok);
+  const sim = (b) => (b ? t.acento("✓") : t.perigo("✗"));
+  const linha = (nome, versao, f) => console.log(`${t.texto(nome.padEnd(9))}${(versao ? (versao.length > 20 ? `${versao.slice(0, 19)}…` : versao) : t.perigo("não encontrado")).padEnd(22)}`
+    + `${t.fraco(f.origem === "ausente" ? "" : `${f.caminho}  (${f.origem})`)}`);
+
+  console.log(`${t.texto(`gdm-extractor ${VERSAO}`)} ${t.fraco(`· node ${process.versions.node} · ${process.platform} ${os.release()}`)}`);
+  linha("yt-dlp", vYt, F.ytdlp);
+  linha("ffmpeg", vFf, F.ffmpeg);
+  linha("ffprobe", vFp, F.ffprobe);
+  console.log(`${t.texto("encoders".padEnd(9))}${enc.itens.map((i) => `${i.nome} ${sim(i.tem)}`).join("  ")}`);
+  // Sem SVT-AV1 (o ffmpeg do instalador win7): o formato AV1 funciona, mas pelo libaom (seção 11.2).
+  if (enc.ok && !enc.svtAv1) console.log(`${" ".repeat(9)}${t.fraco("AV1 pelo libaom-av1: funciona, mas bem mais lento que o SVT-AV1")}`);
+  console.log(`${t.texto("js".padEnd(9))}${js && jsUsado ? js : t.fraco(js
+    ? `${js} (yt-dlp antigo demais para --js-runtimes)` : "nenhum além do padrão do yt-dlp (deno); o YouTube pode falhar")}`);
+  console.log(`${t.texto("config".padEnd(9))}${t.fraco(`${ARQ_CONFIG}${carregaConfig().existe ? "" : " (ainda não criada)"}`)}`);
+
+  const faltas = [
+    !vYt && "yt-dlp", !vFf && "ffmpeg", !vFp && "ffprobe",
+    ...enc.itens.filter((i) => i.obrigatorio && !i.tem).map((i) => `encoder ${i.nome}`),
+    !enc.itens.some((i) => i.tem && /av1/.test(i.nome)) && "encoder AV1 (libsvtav1 ou libaom-av1)",
+  ].filter(Boolean);
+  console.log(ok ? `\n${t.acento("✔")} ${t.texto("tudo pronto.")}` : `\n${t.perigo("✖")} ${t.texto(`falta: ${faltas.join(", ")}.`)}`);
+  process.exit(ok ? 0 : 1);
+}
+
+// ── --configurar (Instalador-Implement.md, seção 2.4) ─────────────────────────
+const FORMATOS_CONFIG = [
+  { id: null, rotulo: "perguntar sempre (menu)" },
+  { id: "webm", rotulo: "WEBM · vp9 · tamanho mínimo" },
+  { id: "av1", rotulo: "WEBM · av1 · menor ainda, mais lento" },
+  { id: "gif", rotulo: "GIF" },
+];
+
+/**
+ * Sem outras opções e com terminal: pergunta pasta e formato. Com `-o`,
+ * `--formato`, `--gif-fps` ou `--gif-largura`: grava só esses valores (é assim
+ * que o instalador chama). `--mostra` imprime a config em `chave=valor`.
+ */
+async function configura(op, { sair = true } = {}) {
+  if (op.mostra) { process.stdout.write(`arquivo=${ARQ_CONFIG}\n${linhasDaConfig(op)}`); process.exit(0); }
+  const chaves = { saida: "saida", formato: "formato", gifFps: "gifFps", gifLargura: "gifLargura" };
+  let mudancas = Object.fromEntries([...op.dadas].filter((k) => k in chaves).map((k) => [k, op[k]]));
+
+  if (!Object.keys(mudancas).length) {
+    if (!process.stdin.isTTY) falha("Sem terminal interativo: use --configurar -o <pasta> --formato webm|av1|gif|menu.", 2);
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const pergunta = (q) => new Promise((r) => rl.question(q, r));
+    console.log(`\n  ${t.selo("gdm-extractor")} ${t.texto("configuração")}\n`);
+    const saida = (await pergunta(`  ${t.texto("Onde salvar os arquivos?")} ${t.fraco(`[${op.saida}]`)} `)).trim() || op.saida;
+    console.log(`\n  ${t.texto("Formato padrão")}`);
+    FORMATOS_CONFIG.forEach((f, i) => console.log(`  ${t.acento(String(i + 1))} ${f.id === op.formato ? t.pico(f.rotulo) : t.texto(f.rotulo)}`));
+    const atual = FORMATOS_CONFIG.findIndex((f) => f.id === op.formato) + 1;
+    const resp = (await pergunta(`  ${t.fraco(`[${atual}]`)} `)).trim();
+    rl.close();
+    const escolhido = FORMATOS_CONFIG[Number(resp || atual) - 1];
+    if (!escolhido) falha("Escolha um número de 1 a 4.", 2);
+    mudancas = { saida, formato: escolhido.id };
+  }
+
+  if (mudancas.saida) {
+    mudancas.saida = path.resolve(mudancas.saida); // relativo mudaria conforme a pasta atual
+    try { fs.mkdirSync(mudancas.saida, { recursive: true }); }
+    catch (e) { falha(`Não foi possível criar a pasta ${mudancas.saida} (${e.code ?? e.message}).`, 2); }
+  }
+  gravaConfig(mudancas);
+  console.log(`\n  ${t.acento("✔")} ${t.texto("configuração salva em")} ${t.fraco(ARQ_CONFIG)}\n`);
+  if (sair) process.exit(0);
 }
 
 // ── Logo e letreiro em binário ────────────────────────────────────────────────
@@ -428,6 +567,7 @@ class TelaCheia {
     this.abertura = null; // X5, só enquanto o logo está se formando
     this.ativa = false;
     this.historico = []; // linhas dos arquivos gerados, impressas na tela normal ao sair
+    this.avisos = []; // avisos do início (config, yt-dlp velho), impressos depois do histórico
   }
 
   /** Volta ao estado inicial (campo de URL vazio) para a próxima extração. */
@@ -498,6 +638,7 @@ class TelaCheia {
     process.stdout.write("\x1b[0m\x1b[?7h\x1b[?25h\x1b[?1049l");
     // O que foi extraído fica no histórico do terminal, mesmo saindo por erro ou Ctrl+C.
     for (const l of this.historico) console.log(l);
+    for (const a of this.avisos) console.log(a);
   }
 
   dimensiona() {
@@ -1003,9 +1144,13 @@ function etapa(texto) {
 }
 
 // ── Argumentos ────────────────────────────────────────────────────────────────
-function leArgs(argv) {
-  const op = { url: null, saida: path.join(os.homedir(), "Downloads"), formato: null, gifFps: 15, gifLargura: 480,
-    trecho: {} }; // { inicio, fim, duracao } em segundos, das opções do recorte (F3)
+/** Opções da linha de comando por cima da config (que fica por cima dos padrões). */
+function leArgs(argv, config = {}) {
+  const op = aplicaConfig({ url: null, saida: path.join(os.homedir(), "Downloads"), formato: null, gifFps: 15,
+    gifLargura: 480, verificarYtDlp: true,
+    trecho: {}, // { inicio, fim, duracao } em segundos, das opções do recorte (F3)
+    dadas: new Set(), // opções passadas na linha de comando (o --configurar grava só essas)
+    diagnostico: false, configurar: false, mostra: false }, config);
   /** Valor da opção `a`; sem valor é argumento inválido (código 2). */
   const valor = (i, a) => {
     if (argv[i] === undefined || argv[i] === "") falha(`A opção ${a} precisa de um valor.`, 2);
@@ -1015,13 +1160,22 @@ function leArgs(argv) {
     const a = argv[i];
     if (a === "-h" || a === "--help") ajuda();
     else if (a === "-v" || a === "--version") { console.log(VERSAO); process.exit(0); }
-    else if (a === "-o" || a === "--out") op.saida = valor(++i, a);
-    else if (a === "--formato") op.formato = valor(++i, a);
-    else if (a === "--gif-fps") op.gifFps = Number(valor(++i, a));
-    else if (a === "--gif-largura") op.gifLargura = Number(valor(++i, a));
+    else if (a === "--diagnostico") op.diagnostico = true;
+    else if (a === "--configurar") op.configurar = true;
+    else if (a === "--mostra") op.mostra = true;
+    else if (a === "-o" || a === "--out") { op.saida = valor(++i, a); op.dadas.add("saida"); }
+    else if (a === "--formato") { op.formato = valor(++i, a); op.dadas.add("formato"); }
+    else if (a === "--gif-fps") { op.gifFps = Number(valor(++i, a)); op.dadas.add("gifFps"); }
+    else if (a === "--gif-largura") { op.gifLargura = Number(valor(++i, a)); op.dadas.add("gifLargura"); }
     else if (a === "--inicio" || a === "--fim" || a === "--duracao") op.trecho[a.slice(2)] = tempo(valor(++i, a), a);
     else if (a.startsWith("-")) falha(`Opção desconhecida: ${a}`, 2);
     else op.url = a;
+  }
+  if (op.mostra && !op.configurar) falha("--mostra só vale com --configurar.", 2);
+  // «menu» só existe para o --configurar: volta o formato padrão para «perguntar sempre».
+  if (op.formato === "menu") {
+    if (!op.configurar) falha("--formato menu só vale com --configurar.", 2);
+    op.formato = null;
   }
   // Sem URL, ela é pedida depois do cabeçalho (ver pedeUrl), como no yoinks.
   if (op.url && !eUrlAceita(op.url)) falha(msgUrlRecusada(op.url), 2);
@@ -1070,7 +1224,10 @@ const msgUrlRecusada = (s) => (siteDaUrl(s) === "lista" ? MSG_URL_LISTA : MSG_UR
 // ── Entrada da URL (sem argumento) ────────────────────────────────────────────
 /** Lê a área de transferência sem travar o início (o PowerShell demora a abrir). */
 function leAreaDeTransferencia() {
-  const cmds = process.platform === "win32" ? [["powershell", ["-NoProfile", "-Command", "Get-Clipboard"]]]
+  // O Get-Clipboard é do PowerShell 5; o 2.0 do Windows 7 cai no Windows.Forms (STA).
+  const cmds = process.platform === "win32" ? [["powershell", ["-NoProfile", "-Command", "Get-Clipboard"]],
+    ["powershell", ["-NoProfile", "-Sta", "-Command",
+      "Add-Type -AssemblyName System.Windows.Forms; [Windows.Forms.Clipboard]::GetText()"]]]
     : process.platform === "darwin" ? [["pbpaste", []]]
     : [["wl-paste", ["--no-newline"]], ["xclip", ["-selection", "clipboard", "-o"]]];
   return (async () => {
@@ -1160,7 +1317,11 @@ ${t.texto("Opções:")}
   ${t.acento("--inicio <tempo>")}       ${t.fraco("recorta a partir daqui (83, 90s, 1:23 ou 1:02:03)")}
   ${t.acento("--fim <tempo>")}          ${t.fraco("recorta até aqui (padrão: o fim do vídeo)")}
   ${t.acento("--duracao <tempo>")}      ${t.fraco("ou: duração do trecho, no lugar do --fim")}
+  ${t.acento("--configurar")}           ${t.fraco("pasta e formato padrão (com -o/--formato webm|av1|gif|menu, sem perguntar)")}
+  ${t.acento("--diagnostico")}          ${t.fraco("mostra as ferramentas e os encoders encontrados")}
   ${t.acento("-h, --help / -v")}        ${t.fraco("ajuda / versão")}
+
+${t.fraco(`Configuração: ${ARQ_CONFIG}`)}
 
 ${t.fraco(`Com --formato gif, o &t= de um link do YouTube vira o --inicio (trecho de ${DURACAO_PADRAO_S} s).`)}
 ${t.fraco("Na tela cheia, a tecla r do menu abre o recorte.")}
@@ -1171,7 +1332,7 @@ ${t.fraco("Na tela cheia, a tecla r do menu abre o recorte.")}
 // ── Análise da mídia ──────────────────────────────────────────────────────────
 // Mesma seleção do download WEBM: com ela, o -J já devolve em
 // `requested_formats` o que seria baixado, e o tamanho da fonte sai daí.
-const SELECAO_WEBM = ["-f", "bv*+ba/b", "-S", "res:720,vcodec:vp9,acodec:opus,+size"];
+const SELECAO_WEBM = ["-f", "bv*+ba/b", "-S", "lang,res:720,vcodec:vp9,acodec:opus,+size"];
 
 // Os sabores de WEBM. Mudam só a preferência de codec no -S e o codificador
 // do re-encode; o resto (scale, Opus, nome do arquivo) é igual.
@@ -1217,7 +1378,7 @@ const AMOSTRA_S = 3, POSICOES_AMOSTRA = [0.25, 0.5, 0.75];
 const codecDoSabor = (sabor, m) => CODECS_WEBM[sabor === "av1" && m.svtAv1 ? "av1Svt" : sabor];
 
 /** Lista de encoders do ffmpeg instalado (texto do `ffmpeg -encoders`), ou "" se falhar. */
-const leEncoders = () => roda("ffmpeg", ["-hide_banner", "-encoders"]).then((r) => (r.codigo === 0 ? r.saida : ""));
+const leEncoders = () => roda(F.ffmpeg.caminho, ["-hide_banner", "-encoders"]).then((r) => (r.codigo === 0 ? r.saida : ""));
 
 // Reduz para 720 no lado menor só quando a fonte passa disso (§4); -2 mantém
 // a proporção com dimensão par.
@@ -1231,7 +1392,7 @@ const tamanhoDe = (f, duracao) =>
   f.filesize ?? f.filesize_approx ?? (f.tbr && duracao ? f.tbr * 125 * duracao : undefined);
 
 async function analisa(ytdlp, url) {
-  const r = await roda(ytdlp, ["-J", "--no-warnings", "--no-playlist", ...SELECAO_WEBM, url]);
+  const r = await roda(ytdlp, ["-J", "--no-warnings", "--no-playlist", ...await promessaExtrasYtDlp, ...SELECAO_WEBM, url]);
   if (r.codigo !== 0) falha(msgDoYtDlp(r.erro));
   let info = JSON.parse(r.saida);
   let total = 1;
@@ -1290,7 +1451,7 @@ async function analisa(ytdlp, url) {
 }
 
 async function sondaRemoto(url) {
-  const r = await roda("ffprobe", ["-v", "error", "-select_streams", "v:0",
+  const r = await roda(F.ffprobe.caminho, ["-v", "error", "-select_streams", "v:0",
     "-show_entries", "stream=width,height,avg_frame_rate:format=duration,size", "-of", "json", url]);
   if (r.codigo === -1) return { semFfprobe: true }; // não conseguiu nem iniciar
   if (r.codigo !== 0) return {};
@@ -1481,9 +1642,10 @@ async function baixa(ytdlp, url, args, rotulo, partes) {
   // Com --download-sections quem baixa é o ffmpeg, e o yt-dlp só manda uma
   // linha de progresso, já no fim: no lugar da barra, um spinner.
   const giro = partes.trecho ? etapa("baixando o trecho…") : null;
+  const extras = await promessaExtrasYtDlp;
   const r = await roda(ytdlp, [
     // --print deixa o yt-dlp em modo silencioso; --progress traz a barra de volta.
-    ...args, "--no-playlist", "--no-warnings", "--newline", "--progress",
+    ...args, ...extras, "--no-playlist", "--no-warnings", "--newline", "--progress",
     // Post com várias mídias (sem /video/N): sem isto o yt-dlp baixaria todas.
     ...(partes.item ? ["--playlist-items", String(partes.item)] : []),
     "--progress-template", "download:@@%(progress.downloaded_bytes)s|%(progress.total_bytes,progress.total_bytes_estimate)s",
@@ -1510,7 +1672,7 @@ async function baixa(ytdlp, url, args, rotulo, partes) {
 
 /** start_time do arquivo (o tempo do primeiro pacote), ou null sem ffprobe. */
 async function inicioDoArquivo(arquivo) {
-  const r = await roda("ffprobe", ["-v", "error", "-show_entries", "format=start_time", "-of", "csv=p=0", arquivo]);
+  const r = await roda(F.ffprobe.caminho, ["-v", "error", "-show_entries", "format=start_time", "-of", "csv=p=0", arquivo]);
   const s = Number.parseFloat(r.saida);
   return r.codigo === 0 && Number.isFinite(s) ? s : null;
 }
@@ -1571,7 +1733,7 @@ function move(de, para) {
 async function ffmpegComProgresso(args, duracao, rotulo, extra = () => "") {
   const duracaoUs = (duracao ?? 0) * 1e6;
   let velocidade = "";
-  const r = await roda("ffmpeg", ["-y", "-v", "error", ...args.slice(0, -1),
+  const r = await roda(F.ffmpeg.caminho, ["-y", "-v", "error", ...args.slice(0, -1),
     "-progress", "pipe:1", "-nostats", args.at(-1)], (linha) => {
     const v = linha.match(/^speed=\s*([\d.]+x)/);
     if (v) velocidade = v[1];
@@ -1584,7 +1746,7 @@ async function ffmpegComProgresso(args, duracao, rotulo, extra = () => "") {
 
 /** Pacotes da trilha de vídeo como [tempo em s, bytes], ou [] sem ffprobe. */
 async function pacotesDoVideo(arquivo) {
-  const r = await roda("ffprobe", ["-v", "error", "-select_streams", "v:0",
+  const r = await roda(F.ffprobe.caminho, ["-v", "error", "-select_streams", "v:0",
     "-show_entries", "packet=pts_time,size", "-of", "csv=p=0", arquivo]);
   if (r.codigo !== 0) return [];
   return r.saida.split(/\r?\n/).map((l) => l.split(",").map(Number)).filter(([, b]) => b > 0);
@@ -1624,7 +1786,7 @@ async function prevêKbps(f, pacotesFonte, kbpsFonte, args, tmp) {
   let codificado = 0, original = 0;
   for (const ini of janelas) {
     const saida = path.join(tmp, "amostra.webm");
-    const r = await roda("ffmpeg", ["-y", "-v", "error", "-ss", (ini - f.zero).toFixed(3), "-t", String(dur), "-i", f.arquivo,
+    const r = await roda(F.ffmpeg.caminho, ["-y", "-v", "error", "-ss", (ini - f.zero).toFixed(3), "-t", String(dur), "-i", f.arquivo,
       "-vf", ESCALA_720, ...args, "-an", saida]);
     if (r.codigo !== 0) return null;
     codificado += somaBytes(await pacotesDoVideo(saida));
@@ -1671,7 +1833,7 @@ async function baixaWebm(ytdlp, url, pasta, m, sabor = "webm") {
     // em mkv). O re-encode é feito aqui pelo ffmpeg, e não pelo
     // --recode-video, para ter progresso real (D1) e medir a fonte antes (F1).
     const fonte = await baixa(ytdlp, url, [
-      "-f", "bv*+ba/b", "-S", `res:720,vcodec:${codec.sort},acodec:opus,+size`,
+      "-f", "bv*+ba/b", "-S", `lang,res:720,vcodec:${codec.sort},acodec:opus,+size`,
       "--merge-output-format", "webm/mkv",
       ...(baixaSoOTrecho(m) ? argsDoTrecho(m.recorte) : []),
       // Sufixo do trecho para não sobrescrever a versão inteira (F3), e no AV1
@@ -1785,20 +1947,40 @@ function recorteInicial(m, op, url, comOpcoes, telaCheia) {
 }
 
 async function main() {
-  const op = leArgs(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  let cfg = carregaConfig();
+  let op = leArgs(argv, cfg.config);
+  F = resolveFerramentas(contextoFerramentas(cfg.config));
+  if (op.diagnostico) return diagnostico(cfg.config);
+  if (op.configurar) return configura(op);
+  // Primeira execução sem argumentos, num terminal: configura antes (seção 2.4).
+  if (!cfg.existe && !argv.length && process.stdin.isTTY && process.stdout.isTTY) {
+    await configura(op, { sair: false });
+    cfg = carregaConfig();
+    op = leArgs(argv, cfg.config);
+  }
+
   fs.mkdirSync(op.saida, { recursive: true });
-  const ytdlp = achaYtDlp();
+  const ytdlp = F.ytdlp.caminho;
   if (!op.url && !process.stdin.isTTY) falha(MSG_SEM_URL, 2);
   const promessaClip = op.url ? null : leAreaDeTransferencia();
-  // Lido em paralelo com o resto do início; só é preciso depois da análise (F9).
+  // Lidos em paralelo com o resto do início; só são precisos na análise (F9).
   const promessaEncoders = leEncoders();
+  const promessaVersao = versaoYtDlp();
+  promessaExtrasYtDlp = promessaVersao.then((v) => extrasYtDlp(v, cfg.config));
+  const promessaAvisos = avisosDoInicio(op, cfg.aviso, promessaVersao);
 
   const logo = leLogo();
-  if (logo && process.stdout.isTTY && process.stdin.isTTY && !semCor && TelaCheia.cabe(logo.desenho))
+  if (logo && process.stdout.isTTY && process.stdin.isTTY && !semCor && TelaCheia.cabe(logo.desenho)) {
+    // Na tela cheia, os avisos ficam para a tela normal, ao sair.
+    promessaAvisos.then((avisos) => tela?.avisos.push(...avisos.map((a) => `  ${t.fraco(`! ${a}`)}`)));
     return mainTelaCheia(op, ytdlp, promessaClip, logo, promessaEncoders);
+  }
 
   cabecalho(logo);
   if (!op.url) op.url = await pedeUrl(promessaClip);
+  // Depois do campo de URL, para não atrasá-lo: a análise já espera o `yt-dlp --version`.
+  for (const a of await promessaAvisos) console.log(`  ${t.fraco(`! ${a}`)}`);
 
   const sp = spinner("analisando o link…");
   const m = await analisa(ytdlp, op.url);

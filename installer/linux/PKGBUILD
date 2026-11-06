@@ -1,0 +1,35 @@
+# Maintainer: Mvfm-25 <https://github.com/Mvfm-25>
+# Pacote do Arch para o gdm-extractor (docs/Instalador-Implement.md, seção 10).
+# Depois de publicar a tag v$pkgver no GitHub, rode `updpkgsums` para trocar o SKIP pelo hash.
+pkgname=gdm-extractor
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Baixa mídia do X/Twitter e do YouTube como WEBM (VP9/AV1) ou GIF, no menor tamanho"
+arch=(any)
+url="https://github.com/Mvfm-25/gdm-yoinks"
+license=(GPL-3.0-or-later)
+depends=(nodejs yt-dlp ffmpeg)
+optdepends=('wl-clipboard: colar a URL da área de transferência (Wayland)'
+            'xclip: colar a URL da área de transferência (X11)'
+            'deno: runtime JS alternativo para o yt-dlp no YouTube')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+_dir() { echo "$srcdir/gdm-yoinks-$pkgver"; }
+
+check() {
+  cd "$(_dir)"
+  node --test
+}
+
+package() {
+  cd "$(_dir)"
+  install -Dm644 gdm-yoinks.mjs tempo.mjs ferramentas.mjs config.mjs logo.md package.json \
+    -t "$pkgdir/usr/lib/gdm-yoinks/"
+  install -dm755 "$pkgdir/usr/bin"
+  printf '#!/bin/sh\nexec /usr/bin/node /usr/lib/gdm-yoinks/gdm-yoinks.mjs "$@"\n' > "$pkgdir/usr/bin/gdm-extractor"
+  chmod 755 "$pkgdir/usr/bin/gdm-extractor"
+  install -Dm644 installer/linux/gdm-extractor.desktop -t "$pkgdir/usr/share/applications/"
+  install -Dm644 README.md -t "$pkgdir/usr/share/doc/$pkgname/"
+  install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$pkgname/"
+}

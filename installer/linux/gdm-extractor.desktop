@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=gdm-extractor
+GenericName=Video Extractor
+GenericName[pt_BR]=Extrator de vídeos
+Comment=Download X/Twitter and YouTube media as WEBM or GIF
+Comment[pt_BR]=Baixa mídia do X e do YouTube como WEBM ou GIF
+Exec=gdm-extractor
+Terminal=true
+Categories=AudioVideo;Video;Network;
+Keywords=youtube;twitter;webm;gif;av1;
