@@ -87,7 +87,7 @@ gdm-extractor <url> [opções]
 gdm-extractor                 # sem url: abre o campo de URL (§3.1)
 ```
 
-O comando `gdm-extractor` vem do `bin` do `package.json`. Para instalar a partir da pasta do
+Os padrões de `-o`, `--formato`, `--gif-fps` e `--gif-largura` vêm do `config.json` (`~/.gdm-yoinks/` no Windows, `~/.config/gdm-yoinks/` no Linux) quando ele existe; a linha de comando tem prioridade. O comando `gdm-extractor` vem do `bin` do `package.json`. Para instalar a partir da pasta do
 projeto, rode `npm link`, que cria um link global. Como é um link, editar o
 `gdm-yoinks.mjs` já vale para o comando, sem reinstalar. Para remover:
 `npm unlink -g gdm-extractor`.
@@ -107,6 +107,8 @@ projeto, rode `npm link`, que cria um link global. Como é um link, editar o
 | `--duracao <tempo>` | — | duração do recorte, no lugar do `--fim` |
 | `--dry-run` | — | **(planejado)** mostra o formato escolhido e o tamanho estimado, sem baixar |
 | `-h, --help` / `-v, --version` | — | ajuda / versão |
+| `--configurar` | — | grava pasta e formato padrão no `config.json` (pergunta; com `-o`/`--formato webm\|av1\|gif\|menu`, grava sem perguntar; `--mostra` imprime em `chave=valor`). Roda sozinho na primeira execução sem argumentos |
+| `--diagnostico` | — | mostra as ferramentas, de onde vieram, os encoders e o runtime JS; sai com `1` se faltar algo |
 
 As opções **(planejado)** ainda não existem: hoje são recusadas como `Opção desconhecida`
 (código `2`) e não aparecem no `--help`. Opção sem valor (`-o` no fim da linha) também é
@@ -266,7 +268,7 @@ essentials 2025-08-20).
    ```
    yt-dlp <url>
      -f "bv*+ba/b"
-     -S "res:720,vcodec:vp9,acodec:opus,+size"
+     -S "lang,res:720,vcodec:vp9,acodec:opus,+size"
      --merge-output-format "webm/mkv"
      --no-playlist
      -o "<pasta temporária>/<nome do §3.3>"
@@ -294,10 +296,17 @@ essentials 2025-08-20).
 Como funciona:
 
 - `-S` define a ordem de preferência, campo por campo:
-  1. `res:720`: a maior resolução que não passe de 720.
-  2. `vcodec:vp9`: entre elas, VP9 (AV1 fica atrás, porque é "melhor" que o teto vp9).
-  3. `acodec:opus`: áudio Opus.
-  4. `+size`: entre os empatados, o **menor** arquivo.
+  1. `lang`: o áudio no **idioma original**, e não a dublagem automática do YouTube. Num
+     vídeo com dublagens, cada idioma é um formato de áudio próprio; o original vem com
+     `language_preference` 10 e as dublagens com −1. Sem o `lang` na frente, ele ficaria
+     atrás do `+size`, e a faixa dublada ganharia sempre que fosse uns KB menor (aconteceu
+     com `n7alj9-6KAE`: original em pt-BR, saiu em espanhol ou inglês). Os ids dessas faixas
+     (`251-0`, `251-1`…) mudam de ordem a cada requisição, então não servem para escolher.
+     Em vídeos sem dublagem, todas as faixas têm o mesmo valor e o campo não muda nada.
+  2. `res:720`: a maior resolução que não passe de 720.
+  3. `vcodec:vp9`: entre elas, VP9 (AV1 fica atrás, porque é "melhor" que o teto vp9).
+  4. `acodec:opus`: áudio Opus.
+  5. `+size`: entre os empatados, o **menor** arquivo.
 - `-f "bv*+ba/b"`: melhor vídeo + melhor áudio segundo essa ordem; se o site só tem arquivo
   único (caso dos GIFs do X, que nem têm áudio), usa ele.
 - `--merge-output-format "webm/mkv"`: junta em webm quando os codecs permitem; se não
@@ -321,7 +330,7 @@ O `scale` só roda no re-encode. Um VP9 nativo do YouTube não é tocado, e já 
 
 Mesmo fluxo do §4, com estas diferenças:
 
-- `-S "res:720,vcodec:av01,acodec:opus,+size"`: prefere AV1 na resolução escolhida.
+- `-S "lang,res:720,vcodec:av01,acodec:opus,+size"`: prefere AV1 na resolução escolhida.
 - Há AV1 nativo só quando existe um `av01` **na mesma resolução** que a seleção do VP9 pegou
   (o `-S` decide a resolução antes do codec). Sem AV1 nativo, sempre há re-encode, mesmo que
   a junção tenha dado um webm VP9.
@@ -470,14 +479,18 @@ Quando vídeo e áudio chegam separados, a barra mostra `baixando 1/2` e `baixan
 
 ## 6. Dependências
 
-- **yt-dlp**: usar o do PATH; se não houver, o que o yoinks mantém em
-  `~/.yoinks/bin/yt-dlp.exe`; se também não houver, baixar de
-  `https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe` para
-  `~/.gdm-yoinks/bin/`.
+- **Onde achar cada ferramenta** (`ferramentas.mjs`; detalhes na seção 2.1 do
+  `Instalador-Implement.md`): variável `GDM_YOINKS_<NOME>` → `ferramentas.<nome>` na config →
+  embutida pelo instalador (`<pasta do .mjs>/../tools/`) → PATH → `~/.yoinks/bin/` (só o
+  yt-dlp). O yt-dlp recebe `--ffmpeg-location` com a pasta do ffmpeg resolvido.
+- **yt-dlp**, com um runtime JavaScript para o YouTube: o próprio Node, se for ≥ 22
+  (`--js-runtimes node:<node>`); senão, o padrão do yt-dlp (Deno).
 - **ffmpeg** com `libvpx-vp9`, `libaom-av1` (ou `libsvtav1`, preferido quando existe, §4.1),
-  `libopus` e o codificador `gif`, e **ffprobe**: usar os do
-  PATH ou o pacote npm `ffmpeg-static` (conferir com `ffmpeg -encoders`). O ffprobe é
-  obrigatório para as informações dos GIFs do X (§5.2).
+  `libopus` e o codificador `gif`, e **ffprobe**. O ffprobe é obrigatório para as informações
+  dos GIFs do X (§5.2). O `--diagnostico` confere tudo isso e sai com `1` se faltar algo.
+- **Instalação sem nada antes:** o instalador do Windows traz Node, yt-dlp e ffmpeg; no Arch,
+  o pacote depende dos do pacman (`installer/`, ver o `Instalador-Implement.md`). Isso
+  substitui o download do yt-dlp e o `ffmpeg-static` que esta seção previa.
 - **Node ≥ 18**, sem dependências npm. As cores usam ANSI truecolor, e o menu usa
   `readline` em raw mode.
 
@@ -681,6 +694,8 @@ Mensagens do yt-dlp perdem o prefixo `ERROR: [extrator] ` e o id que ele põe na
 ```
 gdm-extractor [url do X ou do YouTube] [-o pasta] [--formato webm|av1|gif]
               [--inicio t] [--fim t | --duracao t]
+gdm-extractor --diagnostico
+gdm-extractor --configurar [-o pasta] [--formato webm|av1|gif|menu] [--mostra]
 ```
 
 | Item | Estado |
@@ -692,7 +707,7 @@ gdm-extractor [url do X ou do YouTube] [-o pasta] [--formato webm|av1|gif]
 | Teto de bitrate no re-encode (§4, §9) | feito e testado (VP9) |
 | CRF do libaom por amostras, alvo de 70% da fonte (§4.1) | feito e testado |
 | Progresso real do re-encode WEBM (§3.1) | feito e testado |
-| SVT-AV1 quando o ffmpeg tiver (§4.1) | feito, **não testado** (sem ffmpeg com `libsvtav1`) |
+| SVT-AV1 quando o ffmpeg tiver (§4.1) | feito e testado (ffmpeg 8.1 do instalador e 9.0 do Arch) |
 | GIF (§5), com estimativa e aviso de duração (§5.4) | feito e testado |
 | Abertura do logo nascendo da vida (§6.3) | feito e testado num terminal simulado (pty 120×36) |
 | Recorte de trecho (§3.4): opções, `&t=`, fase de recorte, sufixo no nome | feito e testado (`npm test` e §7); tela cheia testada só num terminal simulado |
@@ -703,7 +718,11 @@ gdm-extractor [url do X ou do YouTube] [-o pasta] [--formato webm|av1|gif]
 | Mensagens de erro e códigos de saída (§3.2, §8) | feito, inclusive o `130` do Ctrl+C nos dois modos |
 | Limpeza da pasta temporária em falha (§5.3) | feito e testado (ffmpeg sem permissão de escrita) |
 | Dependências (§6): yt-dlp do yoinks | feito |
-| Dependências (§6): baixar o yt-dlp, `ffmpeg-static`, `--ffmpeg-location`, conferir `ffmpeg -encoders` | **falta** (o `ffmpeg -encoders` já é lido, mas só para escolher o SVT-AV1) |
+| Dependências (§6): resolução das ferramentas, `--ffmpeg-location`, runtime JS, `--diagnostico` | feito e testado (`npm test`, Windows e Arch) |
+| Configuração (`config.json`, `--configurar`) | feito e testado |
+| Instalador do Windows e pacote do Arch (`installer/`) | feito e testado (instalação silenciosa, atualização e desinstalação; `makepkg` num contêiner) |
+| Instalador do Windows 7 SP1 (`build.ps1 -Alvo win7`, experimental) | feito; imports conferidos, instalação e extração testadas no Windows 11 com os binários do win7. **Falta** testar numa VM com o Windows 7 |
+| Modo texto em terminal limitado (Windows antes do 1809, `TERM=linux`) | feito; testado com `TERM=linux` |
 
 ## 11. Relação com o patch no yoinks
 

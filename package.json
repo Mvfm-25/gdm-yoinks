@@ -12,10 +12,12 @@
   "files": [
     "gdm-yoinks.mjs",
     "tempo.mjs",
+    "ferramentas.mjs",
+    "config.mjs",
     "logo.md"
   ],
   "engines": {
     "node": ">=18"
   },
-  "license": "GPL-3.0"
+  "license": "GPL-3.0-or-later"
 }
