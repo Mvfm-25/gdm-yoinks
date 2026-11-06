@@ -1,6 +1,6 @@
 {
   "name": "gdm-extractor",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Baixa mídia do X/Twitter e do YouTube como WEBM (VP9 ou AV1, até 720p, menor arquivo) ou GIF. Protótipo do gdm-yoinks.",
   "type": "module",
   "bin": {

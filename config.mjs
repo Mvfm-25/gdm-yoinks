@@ -34,6 +34,8 @@ export function aplicaConfig(op, c) {
   if (positivo(c.gifFps)) op.gifFps = c.gifFps;
   if (positivo(c.gifLargura)) op.gifLargura = c.gifLargura;
   if (typeof c.verificarYtDlp === "boolean") op.verificarYtDlp = c.verificarYtDlp;
+  // Limite da análise, em segundos (Win7-Patch.md, seção 1.5, item 3).
+  if (positivo(c.tempoLimite)) op.tempoLimite = c.tempoLimite;
   return op;
 }
 

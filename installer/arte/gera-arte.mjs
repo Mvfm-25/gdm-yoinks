@@ -12,7 +12,11 @@ const rgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
 
 const raiz = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const linhas = fs.readFileSync(path.join(raiz, "logo.md"), "utf8").split(/\r?\n/);
-const desenho = linhas.filter((l) => /^[.%]+$/.test(l));
+// Só o primeiro bloco de «.»/«%»: o segundo é a versão de 80 colunas do terminal (Win7-Patch.md, seção 2.2).
+const eDesenho = (l) => /^[.%]+$/.test(l);
+const inicioDesenho = linhas.findIndex(eDesenho);
+const fimDesenho = linhas.findIndex((l, i) => i > inicioDesenho && !eDesenho(l));
+const desenho = linhas.slice(inicioDesenho, fimDesenho < 0 ? linhas.length : fimDesenho);
 const binario = (linhas.find((l) => /^[01 ]+$/.test(l) && /[01]/.test(l)) ?? "").replace(/\s/g, "");
 
 /** Colunas [de, ate) de um pedaço do desenho. «G.D.M.» acaba antes da coluna 29. */

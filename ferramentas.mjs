@@ -123,6 +123,46 @@ export function runtimeJs(ctx) {
   return null;
 }
 
+/** `quickjs:C:\x\qjs.exe` → `quickjs`. */
+export const nomeDoRuntime = (spec) => (spec ? spec.split(":")[0] : null);
+
+/** O que cada runtime roda para imprimir `1`; o nome puro vira o executável do PATH. */
+const PROVAS_JS = {
+  quickjs: { exe: "qjs", args: ["-e", "print(1)"] },
+  node: { exe: "node", args: ["-e", "console.log(1)"] },
+  deno: { exe: "deno", args: ["eval", "console.log(1)"] },
+  bun: { exe: "bun", args: ["-e", "console.log(1)"] },
+};
+
+/**
+ * Comando que prova que o runtime JS abre e roda (Win7-Patch.md, seção 1.6):
+ * o QuickJS oficial travava no Windows 7 antes de imprimir qualquer coisa, e o
+ * yt-dlp ficava esperando por ele sem limite. Devolve { cmd, args } ou null.
+ */
+export function comandoProvaJs(spec) {
+  const m = spec?.match(/^([a-z]+)(?::(.+))?$/s);
+  const prova = m && PROVAS_JS[m[1]];
+  return prova ? { cmd: m[2] ?? prova.exe, args: prova.args } : null;
+}
+
+// ── Etapas da análise (Win7-Patch.md, seção 1.5, item 2) ─────────────────────
+// Com o -v, o yt-dlp conta no stderr o que está fazendo; o -J sozinho fica mudo.
+const ETAPAS = [
+  [/^\[[\w:]+\] (\[jsc[\w:]*\] )?Solving JS challenges/, "resolvendo o desafio JS"],
+  [/^\[youtube\] [\w-]+: Downloading webpage/, "baixando a página"],
+  [/^\[youtube\] [\w-]+: Downloading player /, "baixando o player"],
+  [/^\[youtube\] [\w-]+: Downloading .*(API JSON|client config)/, "consultando o YouTube"],
+  [/^\[twitter\] \d+: Downloading/, "consultando o X"],
+  [/^\[\w+\] [\w-]+: Downloading m3u8/, "lendo os formatos"],
+  [/^\[info\] [\w-]+: Downloading \d+ format/, "escolhendo o formato"],
+];
+
+/** Linha do stderr do yt-dlp → texto da etapa, ou null (linha de debug, ou sem interesse). */
+export function etapaDoYtDlp(linha) {
+  for (const [re, texto] of ETAPAS) if (re.test(linha ?? "")) return texto;
+  return null;
+}
+
 /** Compara versões por partes numéricas (`2025.11.12` < `2026.8.19`). */
 export function comparaVersao(a, b) {
   const pa = String(a).split(".").map(Number), pb = String(b).split(".").map(Number);
@@ -184,3 +224,53 @@ export function terminalLimitado({ plataforma, release, env }) {
   }
   return env.TERM === "linux";
 }
+
+/**
+ * Quantas cores o terminal mostra (Win7-Patch.md, seção 2.2, passo B). No
+ * terminal limitado, o Node (libuv) ainda emula as 16 cores básicas, mesmo no
+ * conhost do Windows 7, que não entende sequências VT. Só truecolor liga a tela cheia.
+ */
+export function nivelDeCor({ plataforma, release, env, tty }) {
+  if ("NO_COLOR" in env || !tty || env.TERM === "dumb") return "nenhuma";
+  return terminalLimitado({ plataforma, release, env }) ? "16" : "truecolor";
+}
+
+/**
+ * A fonte do console não tem os glifos do programa (›, braille do spinner, ✔,
+ * cantos arredondados…), que viram «▯»: Windows antes do 10 e o console de
+ * texto do Linux (Win7-Patch.md, seção 2.1, causa 3).
+ */
+export const glifosAscii = ({ plataforma, release, env }) =>
+  windowsAntesDo10({ plataforma, release }) || (plataforma !== "win32" && env.TERM === "linux");
+
+/**
+ * Cor hex → código ANSI de frente das 16 cores (30–37, 90–97); o de fundo é +10.
+ * Muito escuro é preto; cinzas (pouca saturação) vão pelo brilho; o resto, pelo
+ * matiz, claro ou escuro.
+ */
+export function ansi16(hex) {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  if (max < 0.15) return 30; // escuro demais para ter cor
+  if ((max - min) / max < 0.25) {
+    if (max < 0.65) return 90;
+    return max < 0.95 ? 37 : 97;
+  }
+  const d = max - min;
+  const h = (max === r ? ((g - b) / d + 6) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4) * 60;
+  // vermelho, amarelo, verde, ciano, azul, magenta, a cada 60°
+  const base = [31, 33, 32, 36, 34, 35][Math.round(h / 60) % 6];
+  return max > 0.6 ? base + 60 : base;
+}
+
+/** Glifo → texto que qualquer fonte de console tem. Acentos, «», ×, · e os blocos ficam. */
+const ASCII = {
+  "✔": "+", "✓": "+", "✖": "x", "✗": "x", "›": ">", "★": "*", "…": "...", "—": "-", "→": "->", "←": "<-",
+  "↑": "^", "↓": "v", "↵": "enter", "⇧": "shift", "━": "=", "─": "-", "│": "|", "╭": "+", "╰": "+",
+  "╮": "+", "╯": "+", "┣": "|", "┫": "|",
+  "⠋": "|", "⠙": "/", "⠹": "-", "⠸": "\\", "⠼": "|", "⠴": "/", "⠦": "-", "⠧": "\\", "⠇": "|", "⠏": "/",
+};
+const RE_ASCII = new RegExp(`[${Object.keys(ASCII).join("")}]`, "gu");
+
+/** Troca os glifos que a fonte do console não tem (Win7-Patch.md, seção 2.2, passo A). */
+export const paraAscii = (s) => s.replace(RE_ASCII, (c) => ASCII[c]);

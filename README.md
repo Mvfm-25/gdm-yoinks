@@ -90,19 +90,35 @@ que ainda rodam no Windows 7. Nenhuma delas é oficial: são forks e builds da c
 |---|---|
 | Node 22 oficial | Node 20 do [`vladimir-andreevich/node.js-windows-7`](https://github.com/vladimir-andreevich/node.js-windows-7) |
 | yt-dlp oficial | `yt-dlp_win7.exe` do [`nicolaasjan/yt-dlp`](https://github.com/nicolaasjan/yt-dlp/releases) |
-| o próprio Node como runtime JS do YouTube | [QuickJS-NG](https://github.com/quickjs-ng/quickjs) (`tools\qjs.exe`) |
+| o próprio Node como runtime JS do YouTube | [QuickJS-NG](https://github.com/quickjs-ng/quickjs) (`tools\qjs.exe`), compilado pelo build (o binário oficial não abre no 7) |
 | ffmpeg do BtbN, com SVT-AV1 | ffmpeg "essentials" do [gyan.dev](https://www.gyan.dev/ffmpeg/builds/): o AV1 sai pelo `libaom`, mais lento |
 
 Antes de instalar, o Windows 7 precisa do Service Pack 1 e do Universal C Runtime
 ([KB2999226](https://support.microsoft.com/kb/2999226)); o assistente confere e avisa. Não há
 "atualizar o yt-dlp": o `-U` do fork pode trazer o `yt-dlp.exe` comum, que só roda no 10. Para
 atualizar, rode um instalador win7 mais novo ou troque o `tools\yt-dlp.exe` pelo
-`yt-dlp_win7.exe` mais recente do fork. A tela cheia não funciona no console do Windows 7, então
-o programa usa o modo linha.
+`yt-dlp_win7.exe` mais recente do fork.
 
-Para gerar: `installer\build.ps1 -Alvo win7`. Além das conferências de sempre, esse build lê os
-imports de cada `.exe` e `.dll` e para se algum usar uma função do Windows 8 ou mais novo
-(`installer/confere-win7.mjs`).
+O que muda na prática:
+
+- **O YouTube pode ser lento.** O QuickJS não tem JIT, e resolver o desafio JS do YouTube pode
+  levar de segundos a alguns minutos num PC antigo. O spinner mostra a etapa e o tempo passado.
+  A análise desiste depois de 5 min (2 min nos outros sistemas; ajuste com `--tempo-limite`).
+- **Se o QuickJS não abrir**, o programa recusa links do YouTube na hora, com uma mensagem, em vez
+  de esperar. O X continua funcionando. O `--diagnostico` mostra o motivo na linha `js`.
+- **Visual reduzido.** A tela cheia não funciona no console do Windows 7, então o programa usa o
+  modo linha, com as 16 cores do console, caracteres ASCII no lugar dos símbolos que a fonte não
+  tem e um logo de 80 colunas.
+
+Para relatar um problema: `gdm-extractor --log <url>` grava tudo o que o yt-dlp fez num arquivo
+em `%TEMP%` e mostra o caminho no fim.
+
+Para gerar: `installer\build.ps1 -Alvo win7`. Esse build compila o `qjs.exe` do código-fonte com o
+`gcc` do [w64devkit](https://github.com/skeeto/w64devkit) (no PATH ou em `-Gcc`), ligado ao
+`msvcrt.dll` e sem o mimalloc, e para se o resultado depender do UCRT. Além das conferências de
+sempre, ele lê os imports de cada `.exe` e `.dll` e para se algum usar uma função do Windows 8 ou
+mais novo (`installer/confere-win7.mjs`). Essa leitura não prova que o programa abre: o QuickJS
+oficial passava nela e travava no 7. Antes de publicar, teste numa VM com Windows 7.
 
 ### Arch Linux: pacote
 
@@ -128,7 +144,8 @@ O `npm link` cria o comando global `gdm-extractor`. Como é um link, editar o
 no PATH.
 
 Para conferir qualquer instalação: `gdm-extractor --diagnostico`. Ele mostra cada
-ferramenta, de onde ela veio e os encoders do ffmpeg, e sai com código `1` se faltar algo.
+ferramenta, de onde ela veio e os encoders do ffmpeg, testa o runtime JS do YouTube (que precisa
+responder em 5 s) e sai com código `1` se faltar algo.
 
 ## Uso
 
@@ -149,7 +166,9 @@ gdm-extractor https://youtu.be/abc --formato gif --inicio 1:23 --duracao 5
 | `--fim <tempo>` | fim do vídeo | fim do trecho |
 | `--duracao <tempo>` | — | duração do trecho, no lugar do `--fim` |
 | `--configurar` | — | pasta de saída e formato padrão (pergunta; com `-o`/`--formato`, grava sem perguntar) |
-| `--diagnostico` | — | mostra as ferramentas e os encoders encontrados |
+| `--tempo-limite <tempo>` | `2:00` (`5:00` no Windows 7) | desiste da análise do link depois disso |
+| `--log` | — | grava a saída do yt-dlp num arquivo na pasta temporária, para relatar um problema |
+| `--diagnostico` | — | mostra as ferramentas, os encoders e se o runtime JS do YouTube abre |
 | `-h, --help` / `-v, --version` | — | ajuda / versão |
 
 Os padrões ficam em `~/.gdm-yoinks/config.json` no Windows e em `~/.config/gdm-yoinks/config.json`

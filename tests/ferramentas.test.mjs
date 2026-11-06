@@ -3,7 +3,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   nomeExecutavel, resolveFerramenta, avaliaEncoders, runtimeJs, argsJsRuntime, comparaVersao,
-  ytDlpDesatualizado, dicaAtualizacao, terminalLimitado, windowsAntesDo10,
+  ytDlpDesatualizado, dicaAtualizacao, terminalLimitado, windowsAntesDo10, comandoProvaJs, nomeDoRuntime,
+  etapaDoYtDlp, nivelDeCor, glifosAscii, ansi16, paraAscii,
 } from "../ferramentas.mjs";
 
 /** Contexto falso: `arquivos` são os caminhos que "existem" (e são executáveis). */
@@ -168,4 +169,82 @@ test("terminalLimitado: TERM=dumb, Windows antes do 1809, console do Linux", () 
   assert.equal(terminalLimitado({ plataforma: "linux", release: "6.6.1", env: { TERM: "xterm-256color" } }), false);
   assert.equal(terminalLimitado({ plataforma: "linux", release: "6.6.1", env: { TERM: "linux" } }), true);
   assert.equal(terminalLimitado({ plataforma: "linux", release: "6.6.1", env: { TERM: "dumb" } }), true);
+});
+
+// ── Patch 0.1.1 (docs/Win7-Patch.md, seção 1.6) ───────────────────────────────
+test("comandoProvaJs: cada runtime imprime 1 do seu jeito", () => {
+  assert.deepEqual(comandoProvaJs("quickjs:C:\\x\\qjs.exe"), { cmd: "C:\\x\\qjs.exe", args: ["-e", "print(1)"] });
+  assert.deepEqual(comandoProvaJs("quickjs"), { cmd: "qjs", args: ["-e", "print(1)"] });
+  assert.deepEqual(comandoProvaJs("node:/usr/bin/node"), { cmd: "/usr/bin/node", args: ["-e", "console.log(1)"] });
+  assert.deepEqual(comandoProvaJs("deno"), { cmd: "deno", args: ["eval", "console.log(1)"] });
+  assert.deepEqual(comandoProvaJs("bun:/x/bun"), { cmd: "/x/bun", args: ["-e", "console.log(1)"] });
+  assert.equal(comandoProvaJs(null), null);
+  assert.equal(comandoProvaJs("lixo"), null);
+});
+
+test("nomeDoRuntime tira o caminho", () => {
+  assert.equal(nomeDoRuntime("quickjs:C:\\x\\qjs.exe"), "quickjs");
+  assert.equal(nomeDoRuntime("deno"), "deno");
+  assert.equal(nomeDoRuntime(null), null);
+});
+
+test("etapaDoYtDlp traduz as linhas do -v em etapas da análise", () => {
+  assert.equal(etapaDoYtDlp("[youtube] 9N7oSJiKwiQ: Downloading webpage"), "baixando a página");
+  assert.equal(etapaDoYtDlp("[youtube] 9N7oSJiKwiQ: Downloading tv samsung player API JSON"), "consultando o YouTube");
+  assert.equal(etapaDoYtDlp("[youtube] 9N7oSJiKwiQ: Downloading player a5c2aafe-main"), "baixando o player");
+  assert.equal(etapaDoYtDlp("[youtube] [jsc:quickjs] Solving JS challenges using quickjs"), "resolvendo o desafio JS");
+  assert.equal(etapaDoYtDlp("[youtube] 9N7oSJiKwiQ: Downloading m3u8 information"), "lendo os formatos");
+  assert.equal(etapaDoYtDlp("[twitter] 1880040599519703372: Downloading guest token"), "consultando o X");
+  assert.equal(etapaDoYtDlp("[twitter] 1880040599519703372: Downloading GraphQL JSON"), "consultando o X");
+  assert.equal(etapaDoYtDlp("[info] 9N7oSJiKwiQ: Downloading 1 format(s): 137+251"), "escolhendo o formato");
+  assert.equal(etapaDoYtDlp("[debug] [youtube] [jsc:quickjs] Running QuickJS: qjs.exe --script x.js"), null);
+  assert.equal(etapaDoYtDlp("[youtube] Extracting URL: https://youtu.be/x"), null);
+  assert.equal(etapaDoYtDlp(""), null);
+});
+
+// ── Terminal do Windows 7 (docs/Win7-Patch.md, seção 2.2) ─────────────────────
+test("nivelDeCor: truecolor, 16 ou nenhuma", () => {
+  const win = (release, env = {}, tty = true) => nivelDeCor({ plataforma: "win32", release, env, tty });
+  assert.equal(win("10.0.26200"), "truecolor");
+  assert.equal(win("6.1.7601"), "16");
+  assert.equal(win("10.0.17134"), "16");
+  assert.equal(win("6.1.7601", { NO_COLOR: "" }), "nenhuma");
+  assert.equal(win("10.0.26200", {}, false), "nenhuma");
+  const linux = (TERM) => nivelDeCor({ plataforma: "linux", release: "6.6.1", env: { TERM }, tty: true });
+  assert.equal(linux("xterm-256color"), "truecolor");
+  assert.equal(linux("linux"), "16");
+  assert.equal(linux("dumb"), "nenhuma");
+});
+
+test("glifosAscii: Windows antes do 10 e o console de texto do Linux", () => {
+  assert.equal(glifosAscii({ plataforma: "win32", release: "6.1.7601", env: {} }), true);
+  assert.equal(glifosAscii({ plataforma: "win32", release: "10.0.17134", env: {} }), false);
+  assert.equal(glifosAscii({ plataforma: "linux", release: "6.6.1", env: { TERM: "linux" } }), true);
+  assert.equal(glifosAscii({ plataforma: "linux", release: "6.6.1", env: { TERM: "xterm" } }), false);
+});
+
+test("ansi16: a paleta Fósforo nas 16 cores do console", () => {
+  assert.equal(ansi16("#96E072"), 92); // acento / p4
+  assert.equal(ansi16("#d2564f"), 91); // perigo
+  assert.equal(ansi16("#8a9690"), 90); // fraco
+  assert.equal(ansi16("#2c3330"), 90); // borda: visível no fundo preto
+  assert.equal(ansi16("#e4e6e4"), 37); // texto
+  assert.equal(ansi16("#FFFFFF"), 97); // pico
+  assert.equal(ansi16("#0e1020"), 30); // sobreAcento
+  assert.equal(ansi16("#3E8914"), 32); // p2: verde escuro
+});
+
+test("paraAscii troca o que a fonte do console do Windows 7 não tem", () => {
+  assert.equal(paraAscii("✔ 3.2 MB"), "+ 3.2 MB");
+  assert.equal(paraAscii("✖ falhou"), "x falhou");
+  assert.equal(paraAscii("  › link"), "  > link");
+  assert.equal(paraAscii("╭───"), "+---");
+  assert.equal(paraAscii("│ tipo"), "| tipo");
+  assert.equal(paraAscii("analisando…"), "analisando...");
+  assert.equal(paraAscii("↑↓ mover · enter"), "^v mover · enter");
+  assert.equal(paraAscii("0:01 → 0:11"), "0:01 -> 0:11");
+  assert.equal(paraAscii("01  ★  "), "01  *  ");
+  // acentos, «», × e · existem na página de código do console: ficam
+  assert.equal(paraAscii("vídeo «x» 1280×720 · ok"), "vídeo «x» 1280×720 · ok");
+  assert.equal(paraAscii("\x1b[92m✔\x1b[39m"), "\x1b[92m+\x1b[39m");
 });

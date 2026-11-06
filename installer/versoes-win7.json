@@ -20,14 +20,18 @@
   },
   "quickjs": {
     "versao": "0.18.0",
-    "url": "https://github.com/quickjs-ng/quickjs/releases/download/v0.18.0/qjs-windows-x86_64.exe",
-    "sha256": "ff03398d74ea6e6bd3a8e58058f7003225abcac229d7d57775b7aaae812a49c7",
+    "compilar": {
+      "url": "https://github.com/quickjs-ng/quickjs/archive/refs/tags/v0.18.0.tar.gz",
+      "sha256": "28bcd89aa3683fd2a946537e5ce3f11cc46b5cbf3383c7561aaef3df5ff9f1dd",
+      "arquivo": "quickjs-ng-v0.18.0.tar.gz"
+    },
     "licenca": {
       "url": "https://raw.githubusercontent.com/quickjs-ng/quickjs/v0.18.0/LICENSE",
       "sha256": "96f73f9d2a16c21a36b418f06073be26e7d6d5e7c1bc99756b21a4f2c74ef171",
       "arquivo": "quickjs-ng-v0.18.0-LICENSE"
     },
-    "fonte": "https://github.com/quickjs-ng/quickjs/tree/v0.18.0"
+    "fonte": "https://github.com/quickjs-ng/quickjs/tree/v0.18.0",
+    "projeto": "compilado pelo build.ps1 com o w64devkit (gcc, msvcrt, sem mimalloc); o binário oficial não abre no Windows 7 (docs/Win7-Patch.md, seção 1.6)"
   },
   "ffmpeg": {
     "versao": "8.1.2-essentials",

@@ -1,7 +1,7 @@
 ﻿; gdm-extractor: instalador para Windows 10+ e, com /DAlvo=win7, para o Windows 7 SP1
 ; (docs/Instalador-Implement.md, seções 3 a 5 e 11.2). Compilado pelo build.ps1, que monta o stage antes:
-;   ISCC /DVersao=0.1.0 /DStage=<installer\stage> gdm-yoinks.iss
-;   ISCC /DVersao=0.1.0 /DStage=<installer\stage-win7> /DAlvo=win7 gdm-yoinks.iss
+;   ISCC /DVersao=0.1.1 /DStage=<installer\stage> gdm-yoinks.iss
+;   ISCC /DVersao=0.1.1 /DStage=<installer\stage-win7> /DAlvo=win7 gdm-yoinks.iss
 
 #ifndef Versao
   #error Passe a versao: ISCC /DVersao=x.y.z (o build.ps1 faz isso)
@@ -116,7 +116,7 @@ ptbr.Diagnostico=Diagnóstico (gdm-extractor --diagnostico):
 ptbr.AbrirAgora=Abrir o gdm-extractor agora
 ptbr.ApagarConfig=Apagar também a configuração em %1?%n%nOs arquivos baixados não são apagados.
 ptbr.CompFfmpegWin7=ffmpeg e ffprobe (AV1 pelo libaom, sem SVT-AV1)
-ptbr.SemUcrt=Falta o Universal C Runtime do Windows (atualização KB2999226), que o ffmpeg e o QuickJS usam.%n%nInstale-o pelo Windows Update ou em https://support.microsoft.com/kb/2999226 e rode este instalador de novo.
+ptbr.SemUcrt=Falta o Universal C Runtime do Windows (atualização KB2999226), que o ffmpeg usa.%n%nInstale-o pelo Windows Update ou em https://support.microsoft.com/kb/2999226 e rode este instalador de novo.
 en.TipoCompleto=Full (recommended)
 en.TipoPersonalizado=Custom
 en.CompPrograma=gdm-extractor (program and bundled Node)
@@ -148,7 +148,7 @@ en.Diagnostico=Diagnostics (gdm-extractor --diagnostico):
 en.AbrirAgora=Open gdm-extractor now
 en.ApagarConfig=Also delete the configuration in %1?%n%nDownloaded files are not deleted.
 en.CompFfmpegWin7=ffmpeg and ffprobe (AV1 through libaom, no SVT-AV1)
-en.SemUcrt=The Windows Universal C Runtime (update KB2999226), used by ffmpeg and QuickJS, is missing.%n%nInstall it through Windows Update or from https://support.microsoft.com/kb/2999226 and run this installer again.
+en.SemUcrt=The Windows Universal C Runtime (update KB2999226), used by ffmpeg, is missing.%n%nInstall it through Windows Update or from https://support.microsoft.com/kb/2999226 and run this installer again.
 
 [Types]
 Name: "completa"; Description: "{cm:TipoCompleto}"
@@ -226,11 +226,15 @@ const
   FORMATOS = 'menu,webm,av1,gif';
 
 #ifdef Win7
-{ O ffmpeg do gyan.dev e o QuickJS-NG importam o Universal C Runtime (api-ms-win-crt-*),
-  que o Windows 7 só tem com a KB2999226. Sem ele, os dois nem abrem. }
+{ O ffmpeg do gyan.dev importa o Universal C Runtime (api-ms-win-crt-*), que o Windows 7 só
+  tem com a KB2999226. Sem ele, o ffmpeg nem abre. Confere o ucrtbase.dll e também uma das
+  DLLs api-ms-win-crt-*, que é o que o ffmpeg importa de fato: só o ucrtbase.dll pode ter
+  vindo de outro programa (docs/Win7-Patch.md, seção 1.6). O QuickJS do win7 é compilado
+  pelo build.ps1 com o msvcrt e não precisa do UCRT. }
 function InitializeSetup: Boolean;
 begin
-  Result := FileExists(ExpandConstant('{sys}\ucrtbase.dll'));
+  Result := FileExists(ExpandConstant('{sys}\ucrtbase.dll'))
+    and FileExists(ExpandConstant('{sys}\api-ms-win-crt-runtime-l1-1-0.dll'));
   if not Result then
     SuppressibleMsgBox(CustomMessage('SemUcrt'), mbCriticalError, MB_OK, IDOK);
 end;

@@ -36,6 +36,12 @@ test("aplicaConfig usa só os valores válidos e ignora chaves desconhecidas", (
   assert.deepEqual(aplicaConfig({ ...padrao }, { formato: null }), padrao);
 });
 
+test("aplicaConfig: tempoLimite em segundos, só positivo (Win7-Patch.md, seção 1.5)", () => {
+  assert.equal(aplicaConfig({ tempoLimite: 120 }, { tempoLimite: 600 }).tempoLimite, 600);
+  assert.equal(aplicaConfig({ tempoLimite: 120 }, { tempoLimite: 0 }).tempoLimite, 120);
+  assert.equal(aplicaConfig({ tempoLimite: 120 }, { tempoLimite: "5:00" }).tempoLimite, 120);
+});
+
 test("mesclaConfig grava versão, preserva o desconhecido e aceita formato null", () => {
   const existente = { versao: 1, saida: "/a", formato: "gif", chaveDoFuturo: { x: 1 } };
   assert.deepEqual(mesclaConfig(existente, { saida: "/b", formato: null }),

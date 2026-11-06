@@ -19,11 +19,11 @@ import {
 } from "./tempo.mjs";
 import {
   resolveFerramentas, avaliaEncoders, runtimeJs, argsJsRuntime, ytDlpDesatualizado, dicaAtualizacao,
-  terminalLimitado, windowsAntesDo10,
+  windowsAntesDo10, comandoProvaJs, nomeDoRuntime, etapaDoYtDlp, nivelDeCor, glifosAscii, ansi16, paraAscii,
 } from "./ferramentas.mjs";
 import { caminhoConfig, leConfig, aplicaConfig, mesclaConfig, serializaConfig, linhasDaConfig } from "./config.mjs";
 
-const VERSAO = "0.1.0";
+const VERSAO = "0.1.1";
 
 // ── Paleta do sistemaGDM (docs/paleta.md, tema «Fósforo») ─────────────────────
 const PALETA = {
@@ -43,14 +43,32 @@ const PALETA = {
   pico: "#FFFFFF",
 };
 
-// Terminal limitado (Windows antes do 1809, console do Linux, TERM=dumb): sem
-// cores e sem tela cheia, no modo linha (Instalador-Implement.md, seção 9).
-const semCor = "NO_COLOR" in process.env || !process.stdout.isTTY
-  || terminalLimitado({ plataforma: process.platform, release: os.release(), env: process.env });
+// Terminal limitado (Windows antes do 1809, console do Linux): modo linha com as
+// 16 cores básicas, que o Node emula até no conhost do Windows 7. NO_COLOR,
+// TERM=dumb e saída que não é terminal: sem cor. A tela cheia exige truecolor
+// (Instalador-Implement.md, seção 9; Win7-Patch.md, seção 2.2, passo B).
+const ambiente = { plataforma: process.platform, release: os.release(), env: process.env };
+const NIVEL_COR = nivelDeCor({ ...ambiente, tty: process.stdout.isTTY });
+const semCor = NIVEL_COR === "nenhuma";
+const corPlena = NIVEL_COR === "truecolor";
 const rgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)).join(";");
-const cor = (hex, s) => (semCor ? s : `\x1b[38;2;${rgb(hex)}m${s}\x1b[39m`);
-const fundo = (hex, s) => (semCor ? s : `\x1b[48;2;${rgb(hex)}m${s}\x1b[49m`);
+/** Sequência que liga a cor de frente / de fundo, conforme o nível de cor. */
+const sgrFrente = (hex) => (corPlena ? `\x1b[38;2;${rgb(hex)}m` : `\x1b[${ansi16(hex)}m`);
+const sgrFundo = (hex) => (corPlena ? `\x1b[48;2;${rgb(hex)}m` : `\x1b[${ansi16(hex) + 10}m`);
+const cor = (hex, s) => (semCor ? s : `${sgrFrente(hex)}${s}\x1b[39m`);
+const fundo = (hex, s) => (semCor ? s : `${sgrFundo(hex)}${s}\x1b[49m`);
 const negrito = (s) => (semCor ? s : `\x1b[1m${s}\x1b[22m`);
+
+// Fonte do console sem os glifos Unicode (Windows 7): toda a saída passa por
+// paraAscii, e o spinner, a barra e o logo usam versões próprias (Win7-Patch.md,
+// seção 2.2, passo A). Fica aqui, no início, para valer antes de qualquer escrita.
+const ASCII = glifosAscii(ambiente);
+if (ASCII) {
+  for (const fluxo of [process.stdout, process.stderr]) {
+    const escreve = fluxo.write.bind(fluxo);
+    fluxo.write = (dado, ...resto) => escreve(typeof dado === "string" ? paraAscii(dado) : dado, ...resto);
+  }
+}
 
 const t = {
   texto: (s) => cor(PALETA.texto, s),
@@ -105,8 +123,25 @@ function msgDoYtDlp(erro, padrao = "yt-dlp falhou") {
   return msg.replace(/^ERROR:\s*(\[[\w:]+\]\s*)?([\w-]*\d[\w-]*:\s+)?/, "");
 }
 
-/** Roda um programa e devolve { codigo, saida, erro }. `aoLer` recebe cada linha. */
-function roda(cmd, args, aoLer) {
+/**
+ * Encerra um programa filho e os que ele abriu. No Windows, o yt-dlp.exe é um
+ * lançador que abre outro processo (o Python), que por sua vez abre o runtime
+ * JS: só o taskkill /T derruba a árvore inteira.
+ */
+function mata(p) {
+  if (p.exitCode !== null) return;
+  if (process.platform === "win32" && p.pid)
+    spawn("taskkill", ["/pid", String(p.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+  else p.kill();
+}
+
+/**
+ * Roda um programa e devolve { codigo, saida, erro, estourou }. `aoLer(linha,
+ * origem)` recebe cada linha, com origem "saida" ou "erro". Com `limiteMs`, o
+ * programa é encerrado ao passar do limite e `estourou` vem true (Win7-Patch.md,
+ * seção 1.6: o QuickJS travado prendia a análise para sempre).
+ */
+function roda(cmd, args, aoLer, { limiteMs } = {}) {
   return new Promise((resolve) => {
     // No Windows, o yt-dlp (Python) escreve no pipe na página de código do
     // console (cp1252): caracteres fora dela somem. O «:» de um título vira
@@ -115,22 +150,25 @@ function roda(cmd, args, aoLer) {
     const p = spawn(cmd, args, { windowsHide: true, env });
     filhos.add(p);
     p.on("exit", () => filhos.delete(p));
+    let estourou = false;
+    const relogio = limiteMs ? setTimeout(() => { estourou = true; mata(p); }, limiteMs) : null;
     // setEncoding junta os bytes de um caractere que chegue dividido em dois pedaços.
     p.stdout.setEncoding("utf8");
     p.stderr.setEncoding("utf8");
-    let saida = "", erro = "", resto = "";
-    const linhas = (s, guarda) => {
-      guarda(s);
+    let saida = "", erro = "";
+    const resto = { saida: "", erro: "" }; // um por canal, para não misturar pedaços de linha
+    const linhas = (s, origem) => {
+      if (origem === "saida") saida += s; else erro += s;
       if (!aoLer) return;
-      resto += s;
-      const partes = resto.split(/\r?\n|\r/);
-      resto = partes.pop();
-      partes.forEach(aoLer);
+      resto[origem] += s;
+      const partes = resto[origem].split(/\r?\n|\r/);
+      resto[origem] = partes.pop();
+      for (const l of partes) aoLer(l, origem);
     };
-    p.stdout.on("data", (b) => linhas(b, (s) => (saida += s)));
-    p.stderr.on("data", (b) => linhas(b, (s) => (erro += s)));
-    p.on("error", (e) => resolve({ codigo: -1, saida, erro: e.message }));
-    p.on("close", (codigo) => resolve({ codigo, saida, erro }));
+    p.stdout.on("data", (b) => linhas(b, "saida"));
+    p.stderr.on("data", (b) => linhas(b, "erro"));
+    p.on("error", (e) => { clearTimeout(relogio); resolve({ codigo: -1, saida, erro: e.message, estourou }); });
+    p.on("close", (codigo) => { clearTimeout(relogio); resolve({ codigo, saida, erro, estourou }); });
   });
 }
 
@@ -173,19 +211,69 @@ let F = resolveFerramentas(contextoFerramentas({}));
  */
 let promessaExtrasYtDlp = Promise.resolve([]);
 
-async function versaoDe(cmd, args = ["-version"]) {
-  const r = await roda(cmd, args);
-  if (r.codigo !== 0) return null;
+/** Um programa que não responde em tanto tempo é tratado como quebrado (seção 1.6). */
+const LIMITE_VERSAO_MS = 15_000;
+const LIMITE_PROVA_JS_MS = 5_000;
+/** Limite da análise de um link: no Windows 7 o QuickJS é mais lento, então o limite é maior (seção 1.5, item 3). */
+const LIMITE_ANALISE_PADRAO_S = windowsAntesDo10({ plataforma: process.platform, release: os.release() }) ? 300 : 120;
+
+/** Código de saída legível: os negativos do Windows viram hexadecimal (0xC0000135 = DLL faltando). */
+const textoDoCodigo = (c) => (c < 0 ? `0x${(c >>> 0).toString(16).toUpperCase()}` : String(c));
+
+/** { versao, motivo }: a versão, ou por que não deu para lê-la. */
+async function versaoOuMotivo(cmd, args = ["-version"]) {
+  const r = await roda(cmd, args, null, { limiteMs: LIMITE_VERSAO_MS });
+  if (r.estourou) return { versao: null, motivo: `não respondeu em ${LIMITE_VERSAO_MS / 1000} s` };
+  if (r.codigo === -1) return { versao: null, motivo: "não encontrado" };
+  if (r.codigo !== 0) return { versao: null, motivo: `saiu com ${textoDoCodigo(r.codigo)}` };
   const linha = r.saida.trim().split(/\r?\n/)[0];
-  return linha.match(/version (\S+)/)?.[1] ?? linha.split(/\s/)[0];
+  return { versao: linha.match(/version (\S+)/)?.[1] ?? linha.split(/\s/)[0], motivo: null };
 }
+
+const versaoDe = (cmd, args) => versaoOuMotivo(cmd, args).then((r) => r.versao);
 
 const versaoYtDlp = () => versaoDe(F.ytdlp.caminho, ["--version"]);
 
-function extrasYtDlp(versaoYt, config) {
-  const ffmpeg = F.ffmpeg.origem === "ausente" ? [] : ["--ffmpeg-location", path.dirname(F.ffmpeg.caminho)];
-  return [...ffmpeg, ...argsJsRuntime(runtimeJs(contextoFerramentas(config)), versaoYt)];
+const provas = new Map();
+/**
+ * Prova que o runtime JS abre e roda, com limite de tempo (seção 1.6), antes
+ * de entregá-lo ao yt-dlp. Uma vez por runtime. Devolve { ok, ms, motivo }.
+ */
+function provaJs(spec) {
+  if (!provas.has(spec)) provas.set(spec, (async () => {
+    const c = comandoProvaJs(spec);
+    // O próprio Node que está rodando isto não precisa de prova; um runtime desconhecido, o yt-dlp decide.
+    if (!c || c.cmd === process.execPath) return { ok: true, ms: null };
+    const inicio = Date.now();
+    const r = await roda(c.cmd, c.args, null, { limiteMs: LIMITE_PROVA_JS_MS });
+    const ms = Date.now() - inicio;
+    if (r.estourou) return { ok: false, ms, motivo: `não respondeu em ${LIMITE_PROVA_JS_MS / 1000} s` };
+    if (r.codigo === -1) return { ok: false, ms, motivo: `não abriu (${r.erro})` };
+    if (r.codigo !== 0) return { ok: false, ms, motivo: `saiu com ${textoDoCodigo(r.codigo)}` };
+    if (r.saida.trim() !== "1") return { ok: false, ms, motivo: "respondeu algo inesperado" };
+    return { ok: true, ms };
+  })());
+  return provas.get(spec);
 }
+
+/** O runtime JS entregue ao yt-dlp, e o que falhou na prova ({ spec, motivo }), se falhou. */
+let jsEmUso = null, jsQuebrado = null;
+
+async function extrasYtDlp(versaoYt, config) {
+  const ffmpeg = F.ffmpeg.origem === "ausente" ? [] : ["--ffmpeg-location", path.dirname(F.ffmpeg.caminho)];
+  const js = runtimeJs(contextoFerramentas(config));
+  const argsJs = argsJsRuntime(js, versaoYt);
+  if (argsJs.length) {
+    const prova = await provaJs(js);
+    if (!prova.ok) { jsQuebrado = { spec: js, motivo: prova.motivo }; return ffmpeg; }
+    jsEmUso = js;
+  }
+  return [...ffmpeg, ...argsJs];
+}
+
+/** O YouTube sem runtime JS que funcione: recusa na hora, em vez de esperar minutos (seção 1.6). */
+const msgJsQuebrado = () => `O ${nomeDoRuntime(jsQuebrado.spec)}, que o YouTube exige, não funcionou neste computador `
+  + `(${jsQuebrado.motivo}). Links do X continuam funcionando. Rode gdm-extractor --diagnostico e mande o resultado.`;
 
 /** Avisos do início (config inválida, yt-dlp velho), mostrados no modo linha ou ao sair da tela cheia. */
 async function avisosDoInicio(op, avisoConfig, promessaVersao) {
@@ -199,30 +287,36 @@ async function avisosDoInicio(op, avisoConfig, promessaVersao) {
 
 // ── --diagnostico (Instalador-Implement.md, seção 2.2) ────────────────────────
 async function diagnostico(config) {
-  const [vYt, vFf, vFp, encoders] = await Promise.all([
-    versaoYtDlp(), versaoDe(F.ffmpeg.caminho), versaoDe(F.ffprobe.caminho), leEncoders(),
+  const [yt, ff, fp, encoders] = await Promise.all([
+    versaoOuMotivo(F.ytdlp.caminho, ["--version"]), versaoOuMotivo(F.ffmpeg.caminho),
+    versaoOuMotivo(F.ffprobe.caminho), leEncoders(),
   ]);
+  const [vYt, vFf, vFp] = [yt.versao, ff.versao, fp.versao];
   const js = runtimeJs(contextoFerramentas(config));
   const jsUsado = argsJsRuntime(js, vYt).length > 0;
+  // A mesma prova que o programa faz antes de analisar um link (Win7-Patch.md, seção 1.6).
+  const prova = js && jsUsado ? await provaJs(js) : null;
   const enc = avaliaEncoders(encoders);
-  const ok = Boolean(vYt && vFf && vFp && enc.ok);
+  const ok = Boolean(vYt && vFf && vFp && enc.ok && prova?.ok !== false);
   const sim = (b) => (b ? t.acento("✓") : t.perigo("✗"));
-  const linha = (nome, versao, f) => console.log(`${t.texto(nome.padEnd(9))}${(versao ? (versao.length > 20 ? `${versao.slice(0, 19)}…` : versao) : t.perigo("não encontrado")).padEnd(22)}`
+  const linha = (nome, r, f) => console.log(`${t.texto(nome.padEnd(9))}${(r.versao ? (r.versao.length > 20 ? `${r.versao.slice(0, 19)}…` : r.versao) : t.perigo(r.motivo)).padEnd(22)}`
     + `${t.fraco(f.origem === "ausente" ? "" : `${f.caminho}  (${f.origem})`)}`);
 
   console.log(`${t.texto(`gdm-extractor ${VERSAO}`)} ${t.fraco(`· node ${process.versions.node} · ${process.platform} ${os.release()}`)}`);
-  linha("yt-dlp", vYt, F.ytdlp);
-  linha("ffmpeg", vFf, F.ffmpeg);
-  linha("ffprobe", vFp, F.ffprobe);
+  linha("yt-dlp", yt, F.ytdlp);
+  linha("ffmpeg", ff, F.ffmpeg);
+  linha("ffprobe", fp, F.ffprobe);
   console.log(`${t.texto("encoders".padEnd(9))}${enc.itens.map((i) => `${i.nome} ${sim(i.tem)}`).join("  ")}`);
   // Sem SVT-AV1 (o ffmpeg do instalador win7): o formato AV1 funciona, mas pelo libaom (seção 11.2).
   if (enc.ok && !enc.svtAv1) console.log(`${" ".repeat(9)}${t.fraco("AV1 pelo libaom-av1: funciona, mas bem mais lento que o SVT-AV1")}`);
-  console.log(`${t.texto("js".padEnd(9))}${js && jsUsado ? js : t.fraco(js
+  const resultadoProva = !prova ? "" : prova.ok ? `  ${sim(true)} ${t.fraco(prova.ms == null ? "(o próprio Node)" : `${prova.ms} ms`)}` : `  ${t.perigo(`✗ ${prova.motivo}`)}`;
+  console.log(`${t.texto("js".padEnd(9))}${js && jsUsado ? js + resultadoProva : t.fraco(js
     ? `${js} (yt-dlp antigo demais para --js-runtimes)` : "nenhum além do padrão do yt-dlp (deno); o YouTube pode falhar")}`);
   console.log(`${t.texto("config".padEnd(9))}${t.fraco(`${ARQ_CONFIG}${carregaConfig().existe ? "" : " (ainda não criada)"}`)}`);
 
   const faltas = [
     !vYt && "yt-dlp", !vFf && "ffmpeg", !vFp && "ffprobe",
+    prova?.ok === false && `runtime JS do YouTube (${nomeDoRuntime(js)} ${prova.motivo})`,
     ...enc.itens.filter((i) => i.obrigatorio && !i.tem).map((i) => `encoder ${i.nome}`),
     !enc.itens.some((i) => i.tem && /av1/.test(i.nome)) && "encoder AV1 (libsvtav1 ou libaom-av1)",
   ].filter(Boolean);
@@ -245,7 +339,7 @@ const FORMATOS_CONFIG = [
  */
 async function configura(op, { sair = true } = {}) {
   if (op.mostra) { process.stdout.write(`arquivo=${ARQ_CONFIG}\n${linhasDaConfig(op)}`); process.exit(0); }
-  const chaves = { saida: "saida", formato: "formato", gifFps: "gifFps", gifLargura: "gifLargura" };
+  const chaves = { saida: "saida", formato: "formato", gifFps: "gifFps", gifLargura: "gifLargura", tempoLimite: "tempoLimite" };
   let mudancas = Object.fromEntries([...op.dadas].filter((k) => k in chaves).map((k) => [k, op[k]]));
 
   if (!Object.keys(mudancas).length) {
@@ -275,16 +369,25 @@ async function configura(op, { sair = true } = {}) {
 }
 
 // ── Logo e letreiro em binário ────────────────────────────────────────────────
-// O logo vem de logo.md, ao lado deste script: as linhas de «.» e «%» são o
-// desenho, e a linha de 0/1 é «G.D.M. Extractor» em binário. Se o arquivo
-// faltar, o cabeçalho cai para o selo simples.
+// O logo vem de logo.md, ao lado deste script: o primeiro bloco de linhas de
+// «.» e «%» é o desenho, o segundo é a versão compacta (73 colunas, sem os
+// pontos de «G.D.M.») para o console de 80 colunas do Windows 7 (Win7-Patch.md,
+// seção 2.2, passo C). A linha de 0/1 é «G.D.M. Extractor» em binário. Se o
+// arquivo faltar, o cabeçalho cai para o selo simples.
 function leLogo() {
   const dir = path.dirname(fileURLToPath(import.meta.url));
   try {
     const linhas = fs.readFileSync(path.join(dir, "logo.md"), "utf8").split(/\r?\n/);
-    const desenho = linhas.filter((l) => /^[.%]+$/.test(l));
+    const blocos = [];
+    let anteriorEraDesenho = false;
+    for (const l of linhas) {
+      const eDesenho = /^[.%]+$/.test(l);
+      if (eDesenho && !anteriorEraDesenho) blocos.push([]);
+      if (eDesenho) blocos[blocos.length - 1].push(l);
+      anteriorEraDesenho = eDesenho;
+    }
     const binario = linhas.find((l) => /^[01 ]+$/.test(l) && /[01]/.test(l));
-    return desenho.length ? { desenho, binario: binario?.trim() } : null;
+    return blocos.length ? { desenho: blocos[0], compacto: blocos[1] ?? null, binario: binario?.trim() } : null;
   } catch { return null; }
 }
 
@@ -327,8 +430,8 @@ function serializa(celulas) {
   if (semCor) return celulas.map(([c]) => c).join("").trimEnd();
   let s = "", frente, fundoAtual;
   for (const [c, fg, bg] of celulas) {
-    if (bg !== fundoAtual) { s += bg ? `\x1b[48;2;${rgb(bg)}m` : "\x1b[49m"; fundoAtual = bg; }
-    if (fg !== frente && c !== " ") { s += fg ? `\x1b[38;2;${rgb(fg)}m` : "\x1b[39m"; frente = fg; }
+    if (bg !== fundoAtual) { s += bg ? sgrFundo(bg) : "\x1b[49m"; fundoAtual = bg; }
+    if (fg !== frente && c !== " ") { s += fg ? sgrFrente(fg) : "\x1b[39m"; frente = fg; }
     s += c;
   }
   return s + "\x1b[39;49m";
@@ -776,7 +879,9 @@ class TelaCheia {
     if (this.fase === "analisando") {
       const giro = QUADROS[this.passoFita % QUADROS.length];
       this.caixa(q, x0, y, [["› ", PALETA.acento], [corta(c.url, cabe, true), PALETA.texto]], giro);
-      q.centro(y + 4, [["analisando o link…", PALETA.fraco]]);
+      const s = Math.floor((Date.now() - (this.inicioAnalise ?? Date.now())) / 1000);
+      const passado = s >= 2 ? `  ${formataTempo(s)}` : "";
+      q.centro(y + 4, [[this.textoAnalise ?? "analisando o link…", PALETA.fraco], [passado, PALETA.borda]]);
       return;
     }
     const cursor = [piscando ? "█" : " ", PALETA.texto];
@@ -919,6 +1024,10 @@ class TelaCheia {
 
   analisando(url) { this.campo.url = url; this.fase = "analisando"; this.desenha(); }
 
+  /** O que o yt-dlp está fazendo, embaixo do campo, com o tempo passado (Win7-Patch.md, seção 1.5). */
+  etapaAnalise(texto) { this.textoAnalise = texto; }
+  comecaAnalise() { this.textoAnalise = null; this.inicioAnalise = Date.now(); }
+
   mostraCartao(m) { this.cartao = dadosDoCartao(m); }
 
   /** Menu de formatos. Resolve com o id da opção, "sair", ou "recortar" (tecla r, se `recortavel`). */
@@ -1023,7 +1132,9 @@ const letreiro = {
   inicia(binario, largura) {
     this.fita = `${binario}  ★  `;
     this.largura = largura;
-    if (!process.stdout.isTTY || semCor) { console.log("  " + this.quadro()); return; }
+    // Parado fora do truecolor: a animação salva e restaura o cursor (ESC 7/8), que a
+    // emulação do console do Windows 7 pode não entender (Win7-Patch.md, seção 2.2).
+    if (!process.stdout.isTTY || !corPlena) { console.log("  " + this.quadro()); return; }
     process.stdout.write("\x1b[?25l"); // cursor escondido enquanto anda
     process.on("exit", () => process.stdout.write("\x1b[?25h"));
     this.desenhaAqui();
@@ -1074,13 +1185,27 @@ const letreiro = {
 /** Cabeçalho do modo linha: logo parado (a vida só roda na tela cheia) e letreiro. */
 function cabecalho(logo) {
   const colunas = process.stdout.columns ?? 80;
-  const larguraLogo = logo ? Math.max(...logo.desenho.map((l) => l.length)) : 0;
+  const largura = (d) => Math.max(...d.map((l) => l.length));
+  // O desenho completo tem 82 colunas; no console de 80 do Windows 7, vale o compacto (Win7-Patch.md, seção 2.2).
+  const desenho = [logo?.desenho, logo?.compacto].find((d) => d && colunas >= largura(d) + 4);
+  const larguraLogo = desenho ? largura(desenho) : 0;
 
   console.log("");
-  if (logo && colunas >= larguraLogo + 4) {
-    for (let l = 0; l < Math.ceil(logo.desenho.length / 2); l++) {
+  if (desenho && ASCII) {
+    // Sem os meios blocos (▀▄█) na fonte: uma linha do desenho por linha de terminal, com «#».
+    desenho.forEach((linha, py) => {
       const celulas = [];
-      for (let x = 0; x < larguraLogo; x++) celulas.push(celulaLogo(logo.desenho, x, l, null) ?? [" ", null, null]);
+      for (let x = 0; x < larguraLogo; x++) {
+        const c = corPixelLogo(desenho, x, py);
+        celulas.push(c ? ["#", c, null] : [" ", null, null]);
+      }
+      console.log("  " + serializa(celulas));
+    });
+    letreiro.inicia(LETREIRO, larguraLogo - 2);
+  } else if (desenho) {
+    for (let l = 0; l < Math.ceil(desenho.length / 2); l++) {
+      const celulas = [];
+      for (let x = 0; x < larguraLogo; x++) celulas.push(celulaLogo(desenho, x, l, null) ?? [" ", null, null]);
       console.log("  " + serializa(celulas));
     }
     letreiro.inicia(LETREIRO, larguraLogo - 2); // -2: o espaço de cada lado do fundo
@@ -1094,15 +1219,31 @@ function cabecalho(logo) {
 
 // ── Spinner e barra de progresso ──────────────────────────────────────────────
 const QUADROS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const QUADROS_ASCII = ["|", "/", "-", "\\"];
 
-function spinner(texto) {
-  if (!process.stdout.isTTY) { console.log(t.fraco(`… ${texto}`)); return { para() {}, muda() {} }; }
+/**
+ * Spinner do modo linha. Com `cronometro`, mostra o tempo passado a partir de
+ * 2 s (Win7-Patch.md, seção 1.5, item 1: «travou?» vira «está trabalhando»).
+ * `avisa(texto)` deixa uma linha fixa acima do spinner.
+ */
+function spinner(texto, { cronometro = false } = {}) {
+  if (!process.stdout.isTTY) {
+    console.log(t.fraco(`… ${texto}`));
+    return { para() {}, muda() {}, avisa(s) { console.log(`  ${t.fraco(s)}`); } };
+  }
   let i = 0;
-  const desenha = () => process.stdout.write(`\r\x1b[2K  ${t.acento(QUADROS[i++ % QUADROS.length])} ${t.texto(texto)}`);
+  const inicio = Date.now();
+  const passado = () => {
+    const s = Math.floor((Date.now() - inicio) / 1000);
+    return cronometro && s >= 2 ? ` ${t.fraco(formataTempo(s))}` : "";
+  };
+  const giros = ASCII ? QUADROS_ASCII : QUADROS;
+  const desenha = () => process.stdout.write(`\r\x1b[2K  ${t.acento(giros[i++ % giros.length])} ${t.texto(texto)}${passado()}`);
   desenha();
   const id = setInterval(desenha, 80);
   return {
     muda(novo) { texto = novo; },
+    avisa(s) { process.stdout.write(`\r\x1b[2K  ${t.fraco(s)}\n`); desenha(); },
     para(final) {
       clearInterval(id);
       process.stdout.write(`\r\x1b[2K${final ? `  ${final}\n` : ""}`);
@@ -1122,7 +1263,9 @@ function barra(rotulo, fracao, extra = "") {
   linhaAberta = true;
   const largura = 28;
   const cheio = Math.round(Math.max(0, Math.min(1, fracao)) * largura);
-  const desenho = cor(PALETA.acento, "━".repeat(cheio)) + t.borda("━".repeat(largura - cheio));
+  // Em ASCII, cheio e vazio precisam de caracteres diferentes: sem cor, os dois «━» seriam iguais.
+  const [cheioG, vazioG] = ASCII ? ["#", "-"] : ["━", "━"];
+  const desenho = cor(PALETA.acento, cheioG.repeat(cheio)) + t.borda(vazioG.repeat(largura - cheio));
   const pct = `${Math.round(fracao * 100)}`.padStart(3);
   const linha = `  ${t.texto(rotulo.padEnd(12))} ${desenho} ${t.pico(pct + "%")} ${t.fraco(extra)}`;
   if (process.stdout.isTTY) process.stdout.write(`\r\x1b[2K${linha}`);
@@ -1148,6 +1291,8 @@ function etapa(texto) {
 function leArgs(argv, config = {}) {
   const op = aplicaConfig({ url: null, saida: path.join(os.homedir(), "Downloads"), formato: null, gifFps: 15,
     gifLargura: 480, verificarYtDlp: true,
+    tempoLimite: LIMITE_ANALISE_PADRAO_S, // segundos (Win7-Patch.md, seção 1.5, item 3)
+    log: false, // --log: grava a saída do yt-dlp num arquivo (seção 1.5, item 4)
     trecho: {}, // { inicio, fim, duracao } em segundos, das opções do recorte (F3)
     dadas: new Set(), // opções passadas na linha de comando (o --configurar grava só essas)
     diagnostico: false, configurar: false, mostra: false }, config);
@@ -1168,6 +1313,8 @@ function leArgs(argv, config = {}) {
     else if (a === "--gif-fps") { op.gifFps = Number(valor(++i, a)); op.dadas.add("gifFps"); }
     else if (a === "--gif-largura") { op.gifLargura = Number(valor(++i, a)); op.dadas.add("gifLargura"); }
     else if (a === "--inicio" || a === "--fim" || a === "--duracao") op.trecho[a.slice(2)] = tempo(valor(++i, a), a);
+    else if (a === "--tempo-limite") { op.tempoLimite = tempo(valor(++i, a), a); op.dadas.add("tempoLimite"); }
+    else if (a === "--log") op.log = true;
     else if (a.startsWith("-")) falha(`Opção desconhecida: ${a}`, 2);
     else op.url = a;
   }
@@ -1181,6 +1328,7 @@ function leArgs(argv, config = {}) {
   if (op.url && !eUrlAceita(op.url)) falha(msgUrlRecusada(op.url), 2);
   if (op.formato && !["webm", "av1", "gif"].includes(op.formato)) falha("--formato aceita webm, av1 ou gif.", 2);
   if (!(op.gifFps > 0) || !(op.gifLargura > 0)) falha("--gif-fps e --gif-largura precisam ser números positivos.", 2);
+  if (!(op.tempoLimite > 0)) falha("--tempo-limite precisa ser maior que zero.", 2);
   // O trecho só é conferido contra a duração do vídeo depois da análise (recorteDasOpcoes).
   const { inicio = 0, fim, duracao } = op.trecho;
   if (fim != null && duracao != null) falha("Use --fim ou --duracao, não os dois.", 2);
@@ -1318,6 +1466,8 @@ ${t.texto("Opções:")}
   ${t.acento("--fim <tempo>")}          ${t.fraco("recorta até aqui (padrão: o fim do vídeo)")}
   ${t.acento("--duracao <tempo>")}      ${t.fraco("ou: duração do trecho, no lugar do --fim")}
   ${t.acento("--configurar")}           ${t.fraco("pasta e formato padrão (com -o/--formato webm|av1|gif|menu, sem perguntar)")}
+  ${t.acento("--tempo-limite <tempo>")} ${t.fraco(`desiste da análise do link depois disso (padrão ${formataTempo(LIMITE_ANALISE_PADRAO_S)})`)}
+  ${t.acento("--log")}                  ${t.fraco("grava o que o yt-dlp fez num arquivo, para relatar um problema")}
   ${t.acento("--diagnostico")}          ${t.fraco("mostra as ferramentas e os encoders encontrados")}
   ${t.acento("-h, --help / -v")}        ${t.fraco("ajuda / versão")}
 
@@ -1378,7 +1528,8 @@ const AMOSTRA_S = 3, POSICOES_AMOSTRA = [0.25, 0.5, 0.75];
 const codecDoSabor = (sabor, m) => CODECS_WEBM[sabor === "av1" && m.svtAv1 ? "av1Svt" : sabor];
 
 /** Lista de encoders do ffmpeg instalado (texto do `ffmpeg -encoders`), ou "" se falhar. */
-const leEncoders = () => roda(F.ffmpeg.caminho, ["-hide_banner", "-encoders"]).then((r) => (r.codigo === 0 ? r.saida : ""));
+const leEncoders = () => roda(F.ffmpeg.caminho, ["-hide_banner", "-encoders"], null, { limiteMs: LIMITE_VERSAO_MS })
+  .then((r) => (r.codigo === 0 ? r.saida : ""));
 
 // Reduz para 720 no lado menor só quando a fonte passa disso (§4); -2 mantém
 // a proporção com dimensão par.
@@ -1391,9 +1542,52 @@ const resDe = (f) => (f.width && f.height ? Math.min(f.width, f.height) : f.heig
 const tamanhoDe = (f, duracao) =>
   f.filesize ?? f.filesize_approx ?? (f.tbr && duracao ? f.tbr * 125 * duracao : undefined);
 
-async function analisa(ytdlp, url) {
-  const r = await roda(ytdlp, ["-J", "--no-warnings", "--no-playlist", ...await promessaExtrasYtDlp, ...SELECAO_WEBM, url]);
-  if (r.codigo !== 0) falha(msgDoYtDlp(r.erro));
+/**
+ * --log (Win7-Patch.md, seção 1.5, item 4): o stderr do yt-dlp (com -v) vai para
+ * um arquivo na pasta temporária, linha a linha, para sobrar mesmo se o usuário
+ * fechar a janela no meio. Devolve { arquivo, escreve(linha) }.
+ */
+function abreLog(cmd, args) {
+  const carimbo = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const arquivo = path.join(os.tmpdir(), `gdm-extractor-${carimbo}.log`);
+  const cabecalho = [
+    `gdm-extractor ${VERSAO} · node ${process.versions.node} · ${process.platform} ${os.release()}`,
+    `runtime JS: ${jsEmUso ?? (jsQuebrado ? `${jsQuebrado.spec} (falhou: ${jsQuebrado.motivo})` : "nenhum")}`,
+    `comando: "${cmd}" ${args.map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(" ")}`,
+    "",
+  ].join("\n");
+  fs.writeFileSync(arquivo, cabecalho + "\n");
+  return { arquivo, escreve: (linha) => { try { fs.appendFileSync(arquivo, linha + "\n"); } catch {} } };
+}
+
+const NOME_DO_SITE = { x: "O X", youtube: "O YouTube" };
+
+/**
+ * Analisa o link com `yt-dlp -J`. `aoEtapa(texto)` recebe o que o yt-dlp está
+ * fazendo (o -v conta no stderr; o -J sozinho fica mudo). Com `op.tempoLimite`
+ * (segundos), desiste depois disso com uma mensagem que diz o que fazer.
+ */
+async function analisa(ytdlp, url, op = {}, aoEtapa = () => {}) {
+  const extras = await promessaExtrasYtDlp;
+  const site = siteDaUrl(url);
+  if (site === "youtube" && jsQuebrado) falha(msgJsQuebrado());
+  const args = ["-v", "-J", "--no-warnings", "--no-playlist", ...extras, ...SELECAO_WEBM, url];
+  const log = op.log ? abreLog(ytdlp, args) : null;
+  const limiteS = op.tempoLimite ?? LIMITE_ANALISE_PADRAO_S;
+  const r = await roda(ytdlp, args, (linha, origem) => {
+    if (origem !== "erro") return; // o stdout é o JSON
+    log?.escreve(linha);
+    const e = etapaDoYtDlp(linha);
+    if (e) aoEtapa(e);
+  }, { limiteMs: limiteS * 1000 });
+  const comLog = log ? ` Log: ${log.arquivo}` : "";
+  if (r.estourou) {
+    log?.escreve(`\n(encerrado pelo gdm-extractor: passou de ${formataTempo(limiteS)})`);
+    falha(`${NOME_DO_SITE[site] ?? "O site"} não respondeu em ${formataTempo(limiteS)}.`
+      + (log ? comLog : ` Rode gdm-extractor --log ${url} e mande o arquivo gerado.`));
+  }
+  // Sem as linhas de etapa e de debug do -v, sobra o que interessa se não houver um «ERROR:».
+  if (r.codigo !== 0) falha(msgDoYtDlp(r.erro.split(/\r?\n/).filter((l) => !/^\[[\w:]+\]/.test(l)).join("\n")) + comLog);
   let info = JSON.parse(r.saida);
   let total = 1;
   // Post com várias mídias e sem «…/video/N» na URL: usa a primeira. Com o
@@ -1404,7 +1598,6 @@ async function analisa(ytdlp, url) {
   }
   // O yt-dlp baixaria uma live em andamento até ela acabar (§2.2).
   if (info.is_live) falha("Transmissão ao vivo em andamento: tente depois que ela terminar.");
-  const site = siteDaUrl(url);
   const formatos = info.formats ?? [];
   // O X guarda GIFs como MP4 sem áudio em /tweet_video/.
   const fonteGif = formatos.find((f) => /\/tweet_video\//.test(f.url ?? ""));
@@ -1439,7 +1632,7 @@ async function analisa(ytdlp, url) {
   const temAudio = video && video.acodec && video.acodec !== "none";
   const kbpsVideo = video?.vbr || (video?.tbr ? video.tbr - (temAudio ? video.abr ?? 0 : 0) : undefined);
   return {
-    info, site, eGif, total, vp9Nativo, av1Nativo, kbpsVideo,
+    info, site, eGif, total, vp9Nativo, av1Nativo, kbpsVideo, log: log?.arquivo,
     semFfprobe: Boolean(sonda.semFfprobe),
     partes: pedidos.length, // vídeo + áudio separados = 2 downloads
     largura: info.width ?? sonda.largura,
@@ -1946,6 +2139,28 @@ function recorteInicial(m, op, url, comOpcoes, telaCheia) {
   return null;
 }
 
+/** Depois disso resolvendo o desafio JS com o QuickJS, avisa que pode demorar. */
+const AVISO_QUICKJS_MS = 20_000;
+
+/**
+ * Liga as etapas da análise a quem as mostra (spinner ou tela cheia). No
+ * YouTube com o QuickJS, um desafio que demora ganha uma explicação
+ * (Win7-Patch.md, seção 1.5, item 1). `fim()` desarma o aviso.
+ */
+function acompanhaAnalise(url, mostraEtapa, avisa) {
+  let relogio = null;
+  return {
+    aoEtapa(e) {
+      mostraEtapa(e);
+      // jsEmUso só fica definido depois da prova, que a análise espera: por isso a conferência é aqui.
+      const quickjs = siteDaUrl(url) === "youtube" && nomeDoRuntime(jsEmUso) === "quickjs";
+      if (quickjs && e === "resolvendo o desafio JS" && !relogio)
+        relogio = setTimeout(() => avisa("o QuickJS é lento no desafio do YouTube; pode levar alguns minutos"), AVISO_QUICKJS_MS);
+    },
+    fim() { clearTimeout(relogio); },
+  };
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   let cfg = carregaConfig();
@@ -1971,7 +2186,7 @@ async function main() {
   const promessaAvisos = avisosDoInicio(op, cfg.aviso, promessaVersao);
 
   const logo = leLogo();
-  if (logo && process.stdout.isTTY && process.stdin.isTTY && !semCor && TelaCheia.cabe(logo.desenho)) {
+  if (logo && process.stdout.isTTY && process.stdin.isTTY && corPlena && TelaCheia.cabe(logo.desenho)) {
     // Na tela cheia, os avisos ficam para a tela normal, ao sair.
     promessaAvisos.then((avisos) => tela?.avisos.push(...avisos.map((a) => `  ${t.fraco(`! ${a}`)}`)));
     return mainTelaCheia(op, ytdlp, promessaClip, logo, promessaEncoders);
@@ -1982,10 +2197,13 @@ async function main() {
   // Depois do campo de URL, para não atrasá-lo: a análise já espera o `yt-dlp --version`.
   for (const a of await promessaAvisos) console.log(`  ${t.fraco(`! ${a}`)}`);
 
-  const sp = spinner("analisando o link…");
-  const m = await analisa(ytdlp, op.url);
+  const sp = spinner("analisando o link…", { cronometro: true });
+  const acompanha = acompanhaAnalise(op.url, (e) => sp.muda(`${e}…`), (s) => sp.avisa(s));
+  const m = await analisa(ytdlp, op.url, op, acompanha.aoEtapa);
+  acompanha.fim();
   m.svtAv1 = /\blibsvtav1\b/.test(await promessaEncoders);
   sp.para();
+  if (m.log) console.log(`  ${t.fraco(`log salvo em ${m.log}`)}`);
   m.recorte = recorteInicial(m, op, op.url, true, false);
   mostraCartao(m);
 
@@ -2024,7 +2242,11 @@ async function mainTelaCheia(op, ytdlp, promessaClip, logo, promessaEncoders) {
     else url = await tela.pedeUrl(promessaClip);
     if (!url) return sai(false);
 
-    const m = await analisa(ytdlp, url);
+    tela.comecaAnalise();
+    const acompanha = acompanhaAnalise(url, (e) => tela.etapaAnalise(`${e}…`), (s) => tela.etapaAnalise(s));
+    const m = await analisa(ytdlp, url, op, acompanha.aoEtapa);
+    acompanha.fim();
+    if (m.log) tela.avisos.push(`  ${t.fraco(`! log salvo em ${m.log}`)}`);
     m.svtAv1 = /\blibsvtav1\b/.test(await promessaEncoders);
     // --inicio/--fim/--duracao valem só para o primeiro link; os seguintes
     // recortam pela tecla r.

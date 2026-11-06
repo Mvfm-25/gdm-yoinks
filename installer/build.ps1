@@ -9,10 +9,15 @@
 # 3. confere os encoders do ffmpeg, os imports do Windows 7 (só no win7), roda os testes com o Node
 #    embutido e o --diagnostico;
 # 4. chama o ISCC, que gera installer\saida\gdm-extractor-<versão>[-win7]-setup.exe.
+#
+# No win7, o QuickJS-NG é compilado do código-fonte com o gcc do w64devkit (ligado ao msvcrt.dll,
+# sem o UCRT e sem o mimalloc): o binário oficial não abre no Windows 7 (docs/Win7-Patch.md, 1.6).
+# O gcc vem do PATH ou de -Gcc.
 [CmdletBinding()]
 param(
     [switch]$SoStage,
     [string]$Iscc,
+    [string]$Gcc,
     [ValidateSet('win10', 'win7')]
     [string]$Alvo = 'win10'
 )
@@ -82,9 +87,48 @@ $zipNode = Baixa $versoes.node.url $versoes.node.sha256
 $ytdlp = Baixa $versoes.ytdlp.url $versoes.ytdlp.sha256
 $licYtdlp = Baixa $versoes.ytdlp.licenca.url $versoes.ytdlp.licenca.sha256 $versoes.ytdlp.licenca.arquivo
 $zipFfmpeg = Baixa $versoes.ffmpeg.url $versoes.ffmpeg.sha256
+# Compila o qjs.exe a partir do código-fonte (docs/Win7-Patch.md, seção 1.6). Os arquivos e as
+# definições são os do alvo qjs_exe do CMakeLists.txt do QuickJS-NG, sem QJS_USE_MIMALLOC. O -static
+# embute a libgcc e a winpthreads: sobram só KERNEL32 e msvcrt, que existem em qualquer Windows 7.
+$FlagsQjs = @('-O2', '-std=gnu11', '-funsigned-char', '-w', '-DQUICKJS_NG_BUILD', '-D_GNU_SOURCE',
+    '-DWIN32_LEAN_AND_MEAN', '-D_WIN32_WINNT=0x0601')
+function CompilaQjs($tgz, $versao) {
+    $destino = Join-Path $Cache "qjs-$versao-win7.exe"
+    if (Test-Path $destino) { Write-Host "ok  $(Split-Path $destino -Leaf) (já compilado)"; return $destino }
+    if (-not $Gcc) { $Gcc = (Get-Command gcc -ErrorAction SilentlyContinue).Source }
+    if (-not $Gcc) { Falha 'gcc não encontrado. Instale o w64devkit (https://github.com/skeeto/w64devkit) e ponha a pasta bin no PATH, ou passe -Gcc.' }
+    $fontes = Join-Path $Cache "quickjs-$versao-fonte"
+    if (Test-Path $fontes) { Remove-Item $fontes -Recurse -Force }
+    New-Item -ItemType Directory -Force $fontes | Out-Null
+    # O tar do Windows (bsdtar); o do w64devkit, se vier antes no PATH, não entende C:\.
+    & "$env:SystemRoot\System32\tar.exe" -xzf $tgz -C $fontes --strip-components 1
+    if ($LASTEXITCODE -ne 0) { Falha "não deu para extrair $(Split-Path $tgz -Leaf)" }
+    Write-Host "compilando o qjs.exe com $Gcc (leva ~30 s)"
+    Push-Location $fontes
+    try {
+        & $Gcc @FlagsQjs -o $destino qjs.c gen/repl.c gen/standalone.c quickjs.c libregexp.c libunicode.c `
+            dtoa.c quickjs-libc.c -static -static-libgcc '-Wl,--stack,8388608' -lm
+        if ($LASTEXITCODE -ne 0) { Falha 'a compilação do qjs.exe falhou' }
+    } finally { Pop-Location }
+    # Conferência que faltou no 0.1.0: o binário não pode depender do UCRT.
+    $objdump = Join-Path (Split-Path $Gcc -Parent) 'objdump.exe'
+    $dlls = (& $objdump -p $destino | Select-String 'DLL Name:\s*(\S+)' | ForEach-Object { $_.Matches[0].Groups[1].Value }) -join ', '
+    if ($dlls -match 'api-ms-win-crt|ucrtbase') {
+        Remove-Item $destino
+        Falha "o qjs.exe compilado depende do UCRT ($dlls); use um gcc ligado ao msvcrt, como o do w64devkit"
+    }
+    Write-Host "ok  qjs-$versao-win7.exe ($dlls)"
+    return $destino
+}
+
 # Runtime JS do yt-dlp quando o Node embutido é menor que o 22 (seções 2.6 e 11.2).
 if ($versoes.quickjs) {
-    $qjs = Baixa $versoes.quickjs.url $versoes.quickjs.sha256
+    if ($versoes.quickjs.compilar) {
+        $c = $versoes.quickjs.compilar
+        $qjs = CompilaQjs (Baixa $c.url $c.sha256 $c.arquivo) $versoes.quickjs.versao
+    } else {
+        $qjs = Baixa $versoes.quickjs.url $versoes.quickjs.sha256
+    }
     $licQjs = Baixa $versoes.quickjs.licenca.url $versoes.quickjs.licenca.sha256 $versoes.quickjs.licenca.arquivo
 }
 
@@ -126,10 +170,13 @@ if ($Win7) {
 Copy-Item (Join-Path $Raiz 'LICENSE') (Join-Path $Stage 'licencas\gdm-yoinks-LICENSE.txt')
 $projetoNode = if ($versoes.node.projeto) { "`n  build: $($versoes.node.projeto)" } else { '' }
 $projetoYtdlp = if ($versoes.ytdlp.projeto) { "`n  build: $($versoes.ytdlp.projeto)" } else { '' }
+$projetoQjs = if ($versoes.quickjs.compilar) {
+    "`n  build: $($versoes.quickjs.projeto)`n  flags: $($FlagsQjs -join ' ') -static -static-libgcc"
+} else { '' }
 $blocoQjs = if ($versoes.quickjs) { @"
 
 QuickJS-NG $($versoes.quickjs.versao) (MIT; runtime JS do yt-dlp para o YouTube)
-  $($versoes.quickjs.fonte)
+  $($versoes.quickjs.fonte)$projetoQjs
 "@ } else { '' }
 $fontes = @"
 Código-fonte dos programas distribuídos com o gdm-extractor $Versao ($Alvo)
