@@ -549,6 +549,16 @@ Fases do palco:
   5×7, 82 colunas), e a linha de `0`/`1` é «G.D.M. Extractor» em binário. Cada linha de
   terminal mostra duas linhas do desenho com `▀`/`▄`. Sem o arquivo, o programa usa o modo linha
   com o selo simples.
+- **Abertura (o logo nasce da vida):** ao abrir a tela cheia, o logo não aparece pronto. Cada
+  pixel do desenho sai de uma célula viva sorteada (que morre ali, sem rastro) e voa até o seu
+  lugar em **1 s**. A partida de cada pixel é sorteada nos primeiros 300 ms, e o voo desacelera
+  na chegada (cúbica). Nos primeiros 40% do voo o pixel ainda é o bit da célula, na cor da vida;
+  depois vira meio bloco (`▀`/`▄`) e passa para a cor do logo. Se faltarem células vivas, os
+  pixels restantes partem de pontos sorteados. Durante a abertura só o logo e a vida aparecem; o
+  resto da interface surge no fim, e a tela é redesenhada a cada 30 ms. **Qualquer tecla** pula
+  a abertura e não chega ao campo de URL (exceto Ctrl+C, que sai como sempre). A abertura só
+  acontece uma vez, ao abrir; redimensionar a janela durante ela a encerra. A análise de uma URL
+  passada como argumento já começa por trás da abertura, sem esperar.
 - **Jogo da Vida:** na tela cheia, roda o Jogo da Vida de Conway por trás de tudo (B3/S23, bordas
   que dão a volta), uma célula por caractere, a **6 gerações por segundo**. Cada célula viva
   mostra o bit da linha binária do `logo.md` na sua posição; célula que morre deixa um `·` que
@@ -684,6 +694,7 @@ gdm-extractor [url do X ou do YouTube] [-o pasta] [--formato webm|av1|gif]
 | Progresso real do re-encode WEBM (§3.1) | feito e testado |
 | SVT-AV1 quando o ffmpeg tiver (§4.1) | feito, **não testado** (sem ffmpeg com `libsvtav1`) |
 | GIF (§5), com estimativa e aviso de duração (§5.4) | feito e testado |
+| Abertura do logo nascendo da vida (§6.3) | feito e testado num terminal simulado (pty 120×36) |
 | Recorte de trecho (§3.4): opções, `&t=`, fase de recorte, sufixo no nome | feito e testado (`npm test` e §7); tela cheia testada só num terminal simulado |
 | tamanho da fonte e download em partes (§5.5) | feito e testado |
 | comando `gdm-extractor`, campo de URL com área de transferência (§3, §3.1) | feito |

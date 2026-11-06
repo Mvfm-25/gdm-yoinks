@@ -216,7 +216,7 @@ mantendo os nomes de token do §6.1.
 | X2 | Caçar o `7` | M |
 | X3 | Letreiro que se traduz | P |
 | X4 | A vida reage à fase | M |
-| X5 | O logo nasce da vida | M |
+| X5 | ~~O logo nasce da vida~~ (feito) | M |
 | X6 | Controles da vida | P |
 | X7 | Datas especiais | P |
 | X8 | Modo zen | P |
@@ -241,6 +241,9 @@ como se estivesse "pensando".
 **X5. O logo nasce da vida.** Na abertura, as letras do logo começam como células soltas
 espalhadas pela tela e convergem para o desenho do `logo.md` em cerca de 1 s. Pular com qualquer
 tecla.
+
+> **Feito em 2026-11-05** (§6.3, detalhes em `X5-Implement.md`). As células soltas são células
+> vivas de verdade, tiradas da vida no instante da abertura.
 
 **X6. Controles da vida.** Fora do campo de URL: `espaço` pausa, `+`/`−` mudam a velocidade e `r`
 joga um respingo. São pequenos, mas convidam a mexer enquanto o re-encode roda.
