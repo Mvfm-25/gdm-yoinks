@@ -591,7 +591,7 @@ class TelaCheia {
     }
 
     const yT = yL + 2;
-    q.centro(yT, [["baixa vídeo e GIF do X e do YouTube. cola. extrai.", PALETA.texto]]);
+    q.centro(yT, [["Baixa vídeos e gifs do Twitter e do YouTube. Cola. Extrai.", PALETA.texto]]);
     q.centro(yT + 1, [[`webm · webm av1 · gif · v${VERSAO}`, PALETA.fraco]]);
 
     const yP = yT + 3, xP = Math.floor((this.w - LARGURA_PALCO) / 2);
